@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 from Bio.Blast import NCBIWWW
 from Bio.Blast import NCBIXML
 
-# --- פונקציית BLAST חכמה שמחלצת Locus Tags ---
+# --- פונקציית BLAST חכמה שמחלצת Locus Tags באופן גנרי ---
 def check_and_get_blast(primer_seq, species):
     try:
         entrez_query = f"{species}[organism]" if species else ""
@@ -23,11 +23,17 @@ def check_and_get_blast(primer_seq, species):
                 if hsp.align_length >= primer_len * 0.9:
                     significant_hits += 1
                     
-                    # חיפוש חכם של Locus Tags מתוך הטקסט של NCBI
-                    full_title = alignment.title
-                    tags = re.findall(r'(LOC\d+|AT[1-5CM]G\d{5}|PGSC\w+|Sotub\w+|Solyc\w+|Os\d{2}g\d+|Zm\d+\w+)', full_title, re.IGNORECASE)
-                    unique_tags = list(set([t.upper() for t in tags]))
-                    locus_text = ", ".join(unique_tags) if unique_tags else "Not found in title"
+                    # חילוץ גנרי של מזהי גנים (Locus Tags) ללא תלות במין
+                    # מחפש מילים שמכילות גם אותיות וגם מספרים, באורך של לפחות 5 תווים
+                    tags = []
+                    for word in alignment.title.split():
+                        clean_word = word.strip("()[],:;")
+                        if any(c.isalpha() for c in clean_word) and any(c.isdigit() for c in clean_word) and len(clean_word) > 4:
+                            tags.append(clean_word)
+                    
+                    # שומר על סדר ההופעה ומסיר כפילויות, לוקח עד 3 מזהים בולטים
+                    unique_tags = list(dict.fromkeys(tags))[:3]
+                    locus_text = ", ".join(unique_tags) if unique_tags else "N/A"
                     
                     gene_desc = alignment.hit_def[:80] + "..." if len(alignment.hit_def) > 80 else alignment.hit_def
                     
@@ -66,7 +72,6 @@ def color_negative_red(val, threshold):
 
 def color_blast_red(val):
     try:
-        # שולף את המספר הראשון מהמחרוזת (למשל את ה-2 מתוך "2 Hits")
         hits = int(str(val).split()[0])
         if hits > 1:
             return 'background-color: #ffcccc; color: red; font-weight: bold;'
@@ -77,7 +82,7 @@ def color_blast_red(val):
 # --- הגדרות עמוד ---
 st.set_page_config(page_title="Cloning Primer Designer", page_icon="🧬", layout="wide")
 st.title("🧬 Cloning Primer Designer (Volcani Edition)")
-st.markdown("תכנון פריימרים להשתלה עם פיזור חכם, סימולציית קיט **Fast SYBR**, וזיהוי Locus מדויק.")
+st.markdown("תכנון פריימרים להשתלה עם פיזור חכם, סימולציית קיט **Fast SYBR**, וזיהוי גנים חכם לכל מין.")
 st.divider()
 
 # --- ממשק ---
@@ -94,12 +99,12 @@ with col2:
     run_blast_check = st.checkbox("🔍 Run NCBI BLAST Specificity Check (Takes 1-3 minutes)")
 
 with st.expander("⚙️ Advanced Thermodynamics (Fast SYBR Green Master Mix)"):
-    st.info("💡 **Kit Simulation:** The thermodynamics parameters are explicitly calibrated for Fast SYBR® Green Master Mix AB-4385612.")
+    st.info("💡 **Kit Simulation:** The thermodynamics parameters are calibrated for your specific reaction conditions.")
     adv_col1, adv_col2, adv_col3, adv_col4 = st.columns(4)
     with adv_col1:
         primer_conc = st.number_input("Primer Conc. (nM)", value=250.0, step=10.0)
     with adv_col2:
-        mg_conc = st.number_input("Mg2+ Conc. (mM)", value=3.0, step=0.1)
+        mg_conc = st.number_input("Mg2+ Conc. (mM)", value=2.5, step=0.1)
     with adv_col3:
         target_tm = st.slider("Target Tm (°C)", min_value=50.0, max_value=72.0, value=60.0, step=0.5)
     with adv_col4:
@@ -108,9 +113,9 @@ with st.expander("⚙️ Advanced Thermodynamics (Fast SYBR Green Master Mix)"):
     st.markdown("<br>", unsafe_allow_html=True)
     amp_col1, amp_col2, _, _ = st.columns(4)
     with amp_col1:
-        min_amp = st.text_input("Min Amplicon Length", placeholder="e.g., 100")
+        min_amp = st.text_input("Min Amplicon Length", value="80")
     with amp_col2:
-        max_amp = st.text_input("Max Amplicon Length", placeholder="e.g., 1500")
+        max_amp = st.text_input("Max Amplicon Length", value="150")
 
 # --- הרצה ---
 if st.button("🚀 Design Primers", type="primary"):
