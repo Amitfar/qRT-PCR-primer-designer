@@ -7,7 +7,12 @@ import plotly.graph_objects as go
 from Bio.Blast import NCBIWWW
 from Bio.Blast import NCBIXML
 
-# --- פונקציית BLAST חכמה שמחלצת Locus Tags באופן גנרי ---
+# --- פונקציית Reverse Complement לחישוב Template ---
+def rev_comp(seq):
+    complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A'}
+    return "".join(complement.get(base, base) for base in reversed(seq.upper()))
+
+# --- פונקציית BLAST ---
 def check_and_get_blast(primer_seq, species):
     try:
         entrez_query = f"{species}[organism]" if species else ""
@@ -23,18 +28,14 @@ def check_and_get_blast(primer_seq, species):
                 if hsp.align_length >= primer_len * 0.9:
                     significant_hits += 1
                     
-                    # חילוץ גנרי של מזהי גנים (Locus Tags) ללא תלות במין
-                    # מחפש מילים שמכילות גם אותיות וגם מספרים, באורך של לפחות 5 תווים
                     tags = []
                     for word in alignment.title.split():
                         clean_word = word.strip("()[],:;")
                         if any(c.isalpha() for c in clean_word) and any(c.isdigit() for c in clean_word) and len(clean_word) > 4:
                             tags.append(clean_word)
                     
-                    # שומר על סדר ההופעה ומסיר כפילויות, לוקח עד 3 מזהים בולטים
                     unique_tags = list(dict.fromkeys(tags))[:3]
                     locus_text = ", ".join(unique_tags) if unique_tags else "N/A"
-                    
                     gene_desc = alignment.hit_def[:80] + "..." if len(alignment.hit_def) > 80 else alignment.hit_def
                     
                     detail = (
@@ -79,12 +80,19 @@ def color_blast_red(val):
         pass
     return ''
 
+def color_sec_struct(val):
+    if val == '!':
+        return 'background-color: #ffcccc; color: red; font-weight: bold; text-align: center;'
+    elif val == 'v':
+        return 'color: green; font-weight: bold; text-align: center;'
+    return ''
+
 # --- הגדרות עמוד ---
 st.set_page_config(page_title="SPUD - Primer Designer", page_icon="🧬", layout="wide")
 st.title("🧬 SPUD: Specific Primer Universal Designer")
 st.markdown("""
 **SPUD** is a high-precision tool for plant scientists, calibrated for **Fast SYBR® Green** reactions. 
-It features a smart exon-junction distribution algorithm, real-time **$\Delta G$** thermodynamic screening for dimers and hairpins, 
+It features smart exon-junction distribution, real-time **$\Delta G$** screening, template UNAFold-like risk assessment, 
 and automated **Locus Tag** identification for any plant species via NCBI BLAST.
 """)
 st.divider()
@@ -100,10 +108,9 @@ with col2:
     species_name = st.text_input("Species (for BLAST):", "Solanum tuberosum")
     junction_pos = st.text_input("Exon-Exon Junctions (comma separated):", placeholder="e.g., 72, 478, 727")
     st.markdown("<br>", unsafe_allow_html=True)
-    run_blast_check = st.checkbox("🔍 Run NCBI BLAST Specificity Check (Takes 1-3 minutes)")
+    run_blast_check = st.checkbox("🔍 Run NCBI BLAST Specificity Check (Gatekeeper)")
 
 with st.expander("⚙️ Advanced Thermodynamics (Fast SYBR Green Master Mix)"):
-    st.info("💡 **Kit Simulation:** The thermodynamics parameters are calibrated for your specific reaction conditions.")
     adv_col1, adv_col2, adv_col3, adv_col4 = st.columns(4)
     with adv_col1:
         primer_conc = st.number_input("Primer Conc. (nM)", value=250.0, step=10.0)
@@ -126,7 +133,7 @@ if st.button("🚀 Design Primers", type="primary"):
     if not sequence:
         st.error("Please enter a DNA sequence to proceed.")
     else:
-        with st.spinner('Simulating Reaction and Designing Primers...'):
+        with st.spinner('Simulating Reaction, Calculating Folds & Designing Primers...'):
             try:
                 clean_seq = "".join(sequence.split()).upper()
                 junction_list = [int(x.strip()) for x in junction_pos.split(',') if x.strip().isdigit()] if junction_pos else []
@@ -137,7 +144,7 @@ if st.button("🚀 Design Primers", type="primary"):
                     'PRIMER_DNA_CONC': primer_conc, 'PRIMER_SALT_DIVALENT': mg_conc, 
                     'PRIMER_SALT_MONOVALENT': 50.0, 'PRIMER_DNTP_CONC': 0.8,
                     'PRIMER_TM_FORMULA': 1, 'PRIMER_SALT_CORRECTIONS': 1, 'PRIMER_THERMODYNAMIC_OLIGO_ALIGNMENT': 1,
-                    'PRIMER_NUM_RETURN': num_returns 
+                    'PRIMER_NUM_RETURN': max(15, num_returns * 2) # יוצר מאגר גדול לסינון חכם
                 }
 
                 if min_amp.strip().isdigit() and max_amp.strip().isdigit(): 
@@ -147,7 +154,7 @@ if st.button("🚀 Design Primers", type="primary"):
                 elif max_amp.strip().isdigit(): 
                     global_args['PRIMER_PRODUCT_SIZE_RANGE'] = [[50, int(max_amp.strip())]]
 
-                final_candidates = []
+                raw_candidates = []
 
                 if junction_list:
                     all_junction_results = []
@@ -170,20 +177,16 @@ if st.button("🚀 Design Primers", type="primary"):
                         all_junction_results.append(j_cands)
 
                     max_cands = max([len(lst) for lst in all_junction_results]) if all_junction_results else 0
-                    diverse_pool = []
                     for i in range(max_cands):
                         for j_cands in all_junction_results:
                             if i < len(j_cands):
-                                diverse_pool.append(j_cands[i])
-                                if len(diverse_pool) == num_returns: break
-                        if len(diverse_pool) == num_returns: break
-                    final_candidates = sorted(diverse_pool, key=lambda x: x['penalty'])
+                                raw_candidates.append(j_cands[i])
 
                 else:
                     seq_args = {'SEQUENCE_ID': project_name, 'SEQUENCE_TEMPLATE': clean_seq}
                     raw_res = primer3.bindings.designPrimers(seq_args, global_args)
                     for i in range(raw_res.get('PRIMER_PAIR_NUM_RETURNED', 0)):
-                        final_candidates.append({
+                        raw_candidates.append({
                             'penalty': raw_res.get(f'PRIMER_PAIR_{i}_PENALTY', 999.0),
                             'left_start': raw_res.get(f'PRIMER_LEFT_{i}')[0],
                             'right_start': raw_res.get(f'PRIMER_RIGHT_{i}')[0],
@@ -195,57 +198,103 @@ if st.button("🚀 Design Primers", type="primary"):
                             'junction_used': "None"
                         })
 
-                if not final_candidates: 
+                if not raw_candidates: 
                     st.warning("⚠️ No primers found. Try relaxing the constraints.")
                 else:
-                    parsed_data = []
-                    blast_details = [] 
+                    # שלב 1: חישוב Template Secondary Structure Penalty
+                    for cand in raw_candidates:
+                        f_seq = cand['forward_seq']
+                        r_seq = cand['reverse_seq']
+                        
+                        f_temp_tm = primer3.calc_hairpin(rev_comp(f_seq)).tm
+                        r_temp_tm = primer3.calc_hairpin(rev_comp(r_seq)).tm
+                        
+                        # חוק ה-3 מעלות: האם הקיפול קרוב ל-Tm של הפריימר
+                        risk_f = f_temp_tm >= (cand['forward_tm'] - 3.0)
+                        risk_r = r_temp_tm >= (cand['reverse_tm'] - 3.0)
+                        
+                        if risk_f or risk_r:
+                            cand['Template_SecondaryStracture'] = "!"
+                            cand['penalty'] += 50.0 # עונש תרמודינמי כבד
+                        else:
+                            cand['Template_SecondaryStracture'] = "v"
+
+                    # ממיין ראשונית לפי הציון התרמודינמי החדש וחותך לכמות סבירה לבדיקה
+                    raw_candidates.sort(key=lambda x: x['penalty'])
+                    candidates_to_process = raw_candidates[:max(10, num_returns * 2)]
                     
+                    blast_details = []
+
+                    # שלב 2: BLAST + מיון דו-שלבי
+                    if run_blast_check:
+                        for idx, cand in enumerate(candidates_to_process):
+                            st.toast(f"Running BLAST for Candidate {idx+1}/{len(candidates_to_process)}...")
+                            
+                            f_blast_sum, f_blast_det = check_and_get_blast(cand['forward_seq'], species_name)
+                            time.sleep(1)
+                            r_blast_sum, r_blast_det = check_and_get_blast(cand['reverse_seq'], species_name)
+                            time.sleep(1)
+                            
+                            cand['f_blast_sum'] = f_blast_sum
+                            cand['f_blast_det'] = f_blast_det
+                            cand['r_blast_sum'] = r_blast_sum
+                            cand['r_blast_det'] = r_blast_det
+                            
+                            try:
+                                f_hits = int(f_blast_sum.split()[0])
+                            except: f_hits = 99
+                            try:
+                                r_hits = int(r_blast_sum.split()[0])
+                            except: r_hits = 99
+                            
+                            # סימון מועמדים פסולי BLAST (>1)
+                            cand['blast_bad_flag'] = 1 if (f_hits > 1 or r_hits > 1) else 0
+                        
+                        # מיון סופי: קודם פוסל את אלו עם >1 ב-BLAST, ואז לפי Penalty תרמודינמי
+                        candidates_to_process.sort(key=lambda x: (x['blast_bad_flag'], x['penalty']))
+                        final_candidates = candidates_to_process[:num_returns]
+                        
+                        for cand in final_candidates:
+                            blast_details.append({"F": cand['f_blast_det'], "R": cand['r_blast_det']})
+
+                    else:
+                        # אם דילגנו על BLAST
+                        final_candidates = candidates_to_process[:num_returns]
+                        for cand in final_candidates:
+                            cand['f_blast_sum'] = "Skipped"
+                            cand['r_blast_sum'] = "Skipped"
+
+                    # שלב 3: הכנת הטבלה הסופית
+                    parsed_data = []
                     for idx, cand in enumerate(final_candidates):
                         f_seq = cand['forward_seq']
                         r_seq = cand['reverse_seq']
                         
-                        f_hairpin_dg = primer3.calc_hairpin(f_seq).dg / 1000.0
-                        r_hairpin_dg = primer3.calc_hairpin(r_seq).dg / 1000.0
-                        f_self_dg = primer3.calc_homodimer(f_seq).dg / 1000.0
-                        r_self_dg = primer3.calc_homodimer(r_seq).dg / 1000.0
-                        cross_dg = primer3.calc_heterodimer(f_seq, r_seq).dg / 1000.0
-
-                        f_blast_sum, r_blast_sum = "Skipped", "Skipped"
-                        f_blast_det, r_blast_det = "", ""
-                        
-                        if run_blast_check:
-                            st.toast(f"Running Specific BLAST for Pair {idx+1}...")
-                            f_blast_sum, f_blast_det = check_and_get_blast(f_seq, species_name)
-                            time.sleep(1)
-                            r_blast_sum, r_blast_det = check_and_get_blast(r_seq, species_name)
-                            time.sleep(1)
-                            
-                        blast_details.append({"F": f_blast_det, "R": r_blast_det})
-
                         parsed_data.append({
                             "Rank": idx + 1,
                             "Penalty": cand['penalty'],
+                            "Template_SecondaryStracture": cand['Template_SecondaryStracture'],
                             "Junction": cand['junction_used'],
                             "Forward_pos": f"F{cand['left_start']}",
                             "Forward_Seq": f_seq,
-                            "F_Self (ΔG)": f_self_dg,
-                            "F_Hairpin (ΔG)": f_hairpin_dg,
-                            "F_BLAST": f_blast_sum,
+                            "F_Self (ΔG)": primer3.calc_homodimer(f_seq).dg / 1000.0,
+                            "F_Hairpin (ΔG)": primer3.calc_hairpin(f_seq).dg / 1000.0,
+                            "F_BLAST": cand['f_blast_sum'],
                             "F_Tm (°C)": cand['forward_tm'],
                             "Reverse_pos": f"R{cand['right_start']}",
                             "Reverse_Seq": r_seq,
-                            "R_Self (ΔG)": r_self_dg,
-                            "R_Hairpin (ΔG)": r_hairpin_dg,
-                            "R_BLAST": r_blast_sum,
+                            "R_Self (ΔG)": primer3.calc_homodimer(r_seq).dg / 1000.0,
+                            "R_Hairpin (ΔG)": primer3.calc_hairpin(r_seq).dg / 1000.0,
+                            "R_BLAST": cand['r_blast_sum'],
                             "R_Tm (°C)": cand['reverse_tm'],
-                            "CrossDimer (ΔG)": cross_dg,
+                            "CrossDimer (ΔG)": primer3.calc_heterodimer(f_seq, r_seq).dg / 1000.0,
                             "Amp_Length": cand['product_size']
                         })
                     
                     df = pd.DataFrame(parsed_data)
                     st.success("✅ Analysis Complete!")
 
+                    # --- המפה הויזואלית ---
                     st.subheader("🗺️ Amplicon Map")
                     fig = go.Figure()
                     fig.add_shape(type="rect", x0=0, y0=0, x1=len(clean_seq), y1=1, line=dict(color="gray", width=2), fillcolor="lightgray")
@@ -275,11 +324,13 @@ if st.button("🚀 Design Primers", type="primary"):
                         if hasattr(styled_df, "map"):
                             styled_df = styled_df.map(lambda x: color_negative_red(x, -5.0), subset=['F_Self (ΔG)', 'R_Self (ΔG)', 'CrossDimer (ΔG)']) \
                                                  .map(lambda x: color_negative_red(x, -3.0), subset=['F_Hairpin (ΔG)', 'R_Hairpin (ΔG)']) \
-                                                 .map(lambda x: color_blast_red(x), subset=['F_BLAST', 'R_BLAST'])
+                                                 .map(lambda x: color_blast_red(x), subset=['F_BLAST', 'R_BLAST']) \
+                                                 .map(lambda x: color_sec_struct(x), subset=['Template_SecondaryStracture'])
                         else:
                             styled_df = styled_df.applymap(lambda x: color_negative_red(x, -5.0), subset=['F_Self (ΔG)', 'R_Self (ΔG)', 'CrossDimer (ΔG)']) \
                                                  .applymap(lambda x: color_negative_red(x, -3.0), subset=['F_Hairpin (ΔG)', 'R_Hairpin (ΔG)']) \
-                                                 .applymap(lambda x: color_blast_red(x), subset=['F_BLAST', 'R_BLAST'])
+                                                 .applymap(lambda x: color_blast_red(x), subset=['F_BLAST', 'R_BLAST']) \
+                                                 .applymap(lambda x: color_sec_struct(x), subset=['Template_SecondaryStracture'])
                     except:
                         styled_df = df
 
