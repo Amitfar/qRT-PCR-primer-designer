@@ -80,9 +80,13 @@ def color_blast_red(val):
     return ''
 
 # --- הגדרות עמוד ---
-st.set_page_config(page_title="Cloning Primer Designer", page_icon="🧬", layout="wide")
-st.title("🧬 Cloning Primer Designer (Volcani Edition)")
-st.markdown("תכנון פריימרים להשתלה עם פיזור חכם, סימולציית קיט **Fast SYBR**, וזיהוי גנים חכם לכל מין.")
+st.set_page_config(page_title="SPUD - Primer Designer", page_icon="🧬", layout="wide")
+st.title("🧬 SPUD: Specific Primer Universal Designer")
+st.markdown("""
+**SPUD** is a high-precision tool for plant scientists, calibrated for **Fast SYBR® Green** reactions. 
+It features a smart exon-junction distribution algorithm, real-time **$\Delta G$** thermodynamic screening for dimers and hairpins, 
+and automated **Locus Tag** identification for any plant species via NCBI BLAST.
+""")
 st.divider()
 
 # --- ממשק ---
