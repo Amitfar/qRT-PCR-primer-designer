@@ -2,11 +2,12 @@ import streamlit as st
 import primer3
 import pandas as pd
 import time
+import re
 import plotly.graph_objects as go
 from Bio.Blast import NCBIWWW
 from Bio.Blast import NCBIXML
 
-# --- פונקציית BLAST מעודכנת (מציגה שם ביולוגי אמיתי) ---
+# --- פונקציית BLAST חכמה שמחלצת Locus Tags ---
 def check_and_get_blast(primer_seq, species):
     try:
         entrez_query = f"{species}[organism]" if species else ""
@@ -21,12 +22,19 @@ def check_and_get_blast(primer_seq, species):
             for hsp in alignment.hsps:
                 if hsp.align_length >= primer_len * 0.9:
                     significant_hits += 1
-                    # שולף את השם הביולוגי האמיתי של הגן במקום רק מספר!
-                    gene_desc = alignment.hit_def[:90] + "..." if len(alignment.hit_def) > 90 else alignment.hit_def
+                    
+                    # חיפוש חכם של Locus Tags מתוך הטקסט של NCBI
+                    full_title = alignment.title
+                    tags = re.findall(r'(LOC\d+|AT[1-5CM]G\d{5}|PGSC\w+|Sotub\w+|Solyc\w+|Os\d{2}g\d+|Zm\d+\w+)', full_title, re.IGNORECASE)
+                    unique_tags = list(set([t.upper() for t in tags]))
+                    locus_text = ", ".join(unique_tags) if unique_tags else "Not found in title"
+                    
+                    gene_desc = alignment.hit_def[:80] + "..." if len(alignment.hit_def) > 80 else alignment.hit_def
                     
                     detail = (
-                        f"Gene: {gene_desc}\n"
-                        f"Accession: {alignment.accession} | Identity: {hsp.identities}/{hsp.align_length}\n"
+                        f"Locus / Gene ID: {locus_text}\n"
+                        f"Description: {gene_desc}\n"
+                        f"NCBI Acc: {alignment.accession} | Identity: {hsp.identities}/{hsp.align_length}\n"
                         f"Query:  {hsp.query}\n"
                         f"Match:  {hsp.match}\n"
                         f"Sbjct:  {hsp.sbjct}\n"
@@ -35,12 +43,19 @@ def check_and_get_blast(primer_seq, species):
                     report.append(detail)
         
         detailed_text = "\n".join(report) if report else "No significant hits found (>90% coverage)."
-        summary = f"{significant_hits} Hits" if significant_hits > 0 else "0 Hits ✅"
+        
+        if significant_hits == 0:
+            summary = "0 Hits ✅"
+        elif significant_hits == 1:
+            summary = "1 Hit ✅"
+        else:
+            summary = f"{significant_hits} Hits"
+            
         return summary, detailed_text
     except Exception as e:
         return "Error", f"BLAST Error: {str(e)}"
 
-# --- הגדרות עיצוב לטבלה ---
+# --- פונקציות עיצוב לטבלה ---
 def color_negative_red(val, threshold):
     try:
         if float(val) < threshold:
@@ -49,11 +64,23 @@ def color_negative_red(val, threshold):
         pass
     return ''
 
+def color_blast_red(val):
+    try:
+        # שולף את המספר הראשון מהמחרוזת (למשל את ה-2 מתוך "2 Hits")
+        hits = int(str(val).split()[0])
+        if hits > 1:
+            return 'background-color: #ffcccc; color: red; font-weight: bold;'
+    except:
+        pass
+    return ''
+
+# --- הגדרות עמוד ---
 st.set_page_config(page_title="Cloning Primer Designer", page_icon="🧬", layout="wide")
 st.title("🧬 Cloning Primer Designer (Volcani Edition)")
-st.markdown("תכנון פריימרים להשתלה עם פיזור חכם, סימולציית קיט **Fast SYBR**, ופרמטרים תרמודינמיים מדויקים.")
+st.markdown("תכנון פריימרים להשתלה עם פיזור חכם, סימולציית קיט **Fast SYBR**, וזיהוי Locus מדויק.")
 st.divider()
 
+# --- ממשק ---
 col1, col2 = st.columns([2, 1])
 
 with col1:
@@ -85,6 +112,7 @@ with st.expander("⚙️ Advanced Thermodynamics (Fast SYBR Green Master Mix)"):
     with amp_col2:
         max_amp = st.text_input("Max Amplicon Length", placeholder="e.g., 1500")
 
+# --- הרצה ---
 if st.button("🚀 Design Primers", type="primary"):
     if not sequence:
         st.error("Please enter a DNA sequence to proceed.")
@@ -112,7 +140,6 @@ if st.button("🚀 Design Primers", type="primary"):
 
                 final_candidates = []
 
-                # פונקציית איסוף מועמדים (לוגיקת Round-Robin)
                 if junction_list:
                     all_junction_results = []
                     for j in junction_list:
@@ -169,7 +196,6 @@ if st.button("🚀 Design Primers", type="primary"):
                         f_seq = cand['forward_seq']
                         r_seq = cand['reverse_seq']
                         
-                        # חישוב אקטיבי של ה-Delta G ב-kcal/mol כדי לקבל ערכים שליליים אמיתיים
                         f_hairpin_dg = primer3.calc_hairpin(f_seq).dg / 1000.0
                         r_hairpin_dg = primer3.calc_hairpin(r_seq).dg / 1000.0
                         f_self_dg = primer3.calc_homodimer(f_seq).dg / 1000.0
@@ -236,14 +262,15 @@ if st.button("🚀 Design Primers", type="primary"):
                     st.markdown("### Detailed Results Table")
                     
                     try:
-                        # הפעלת עיצוב דיוק של ספרה אחת (.1f) וצביעה באדום לפי Thresholds אמיתיים
                         styled_df = df.style.format(precision=1)
                         if hasattr(styled_df, "map"):
                             styled_df = styled_df.map(lambda x: color_negative_red(x, -5.0), subset=['F_Self (ΔG)', 'R_Self (ΔG)', 'CrossDimer (ΔG)']) \
-                                                 .map(lambda x: color_negative_red(x, -3.0), subset=['F_Hairpin (ΔG)', 'R_Hairpin (ΔG)'])
+                                                 .map(lambda x: color_negative_red(x, -3.0), subset=['F_Hairpin (ΔG)', 'R_Hairpin (ΔG)']) \
+                                                 .map(lambda x: color_blast_red(x), subset=['F_BLAST', 'R_BLAST'])
                         else:
                             styled_df = styled_df.applymap(lambda x: color_negative_red(x, -5.0), subset=['F_Self (ΔG)', 'R_Self (ΔG)', 'CrossDimer (ΔG)']) \
-                                                 .applymap(lambda x: color_negative_red(x, -3.0), subset=['F_Hairpin (ΔG)', 'R_Hairpin (ΔG)'])
+                                                 .applymap(lambda x: color_negative_red(x, -3.0), subset=['F_Hairpin (ΔG)', 'R_Hairpin (ΔG)']) \
+                                                 .applymap(lambda x: color_blast_red(x), subset=['F_BLAST', 'R_BLAST'])
                     except:
                         styled_df = df
 
