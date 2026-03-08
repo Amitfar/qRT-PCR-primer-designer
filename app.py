@@ -6,11 +6,11 @@ import plotly.graph_objects as go
 from Bio.Blast import NCBIWWW
 from Bio.Blast import NCBIXML
 
-# --- פונקציית BLAST מעודכנת (חכמה יותר + מחזירה Alignment) ---
+# --- פונקציית BLAST חכמה שמחזירה Alignment נגד האורגניזם הספציפי ---
 def check_and_get_blast(primer_seq, species):
     try:
+        # פונה ל-NCBI אך מכוון ספציפית לאורגניזם (למשל Solanum tuberosum)
         entrez_query = f"{species}[organism]" if species else ""
-        # שינוי ל-word_size=11 כדי למנוע "רעש" וזיהוי של 10 Hits לא רלוונטיים
         handle = NCBIWWW.qblast("blastn", "nt", primer_seq, entrez_query=entrez_query, word_size=11, hitlist_size=5)
         blast_record = NCBIXML.read(handle)
         
@@ -20,7 +20,6 @@ def check_and_get_blast(primer_seq, species):
 
         for alignment in blast_record.alignments:
             for hsp in alignment.hsps:
-                # מתייחס רק להתאמות של מעל 90% מהפריימר
                 if hsp.align_length >= primer_len * 0.9:
                     significant_hits += 1
                     detail = (
@@ -39,10 +38,19 @@ def check_and_get_blast(primer_seq, species):
     except Exception as e:
         return "Error", f"BLAST Error: {str(e)}"
 
+# --- הגדרות עיצוב לטבלה לזיהוי ערכים חורגים באדום ---
+def color_negative_red(val, threshold):
+    try:
+        if float(val) < threshold:
+            return 'background-color: #ffcccc; color: red; font-weight: bold;'
+    except:
+        pass
+    return ''
+
 # --- הגדרות עמוד ---
 st.set_page_config(page_title="Cloning Primer Designer", page_icon="🧬", layout="wide")
 st.title("🧬 Cloning Primer Designer (Volcani Edition)")
-st.markdown("תכנון פריימרים להשתלה עם פיזור חכם, מפה ויזואלית, פרמטרים תרמודינמיים מתקדמים ו-BLAST מפורט.")
+st.markdown("תכנון פריימרים להשתלה עם פיזור חכם, מפה ויזואלית, סימולציית קיט **Fast SYBR** ו-BLAST.")
 st.divider()
 
 # --- ממשק המשתמש (Inputs) ---
@@ -59,39 +67,53 @@ with col2:
     st.markdown("<br>", unsafe_allow_html=True)
     run_blast_check = st.checkbox("🔍 Run NCBI BLAST Specificity Check (Takes 1-3 minutes)")
 
-# --- תפריט מתקדם ---
-with st.expander("⚙️ Advanced Cloning & Reaction Settings"):
+# --- תפריט מתקדם מעודכן למעבדת וולקני ---
+with st.expander("⚙️ Advanced Thermodynamics (Fast SYBR Green Master Mix)"):
+    st.info("💡 **Kit Simulation:** The thermodynamics parameters are explicitly calibrated for Fast SYBR® Green Master Mix AB-4385612.")
     adv_col1, adv_col2, adv_col3, adv_col4 = st.columns(4)
     with adv_col1:
-        cloning_type = st.selectbox("Cloning Method", ["Standard PCR", "Restriction Digestion", "Gibson Assembly"])
+        primer_conc = st.number_input("Primer Conc. (nM)", value=250.0, step=10.0)
     with adv_col2:
-        mg_conc = st.number_input("Mg2+ Concentration (mM)", value=1.5, step=0.1)
+        mg_conc = st.number_input("Mg2+ Conc. (mM)", value=3.0, step=0.1)
     with adv_col3:
         target_tm = st.slider("Target Tm (°C)", min_value=50.0, max_value=72.0, value=60.0, step=0.5)
     with adv_col4:
         num_returns = st.slider("Total Primers to Design", min_value=1, max_value=15, value=5, step=1)
         
     st.markdown("<br>", unsafe_allow_html=True)
-    amp_col1, amp_col2, _ = st.columns([1, 1, 2])
+    amp_col1, amp_col2, _, _ = st.columns(4)
     with amp_col1:
-        min_amp = st.text_input("Min Amplicon Length (Optional)", placeholder="e.g., 100")
+        min_amp = st.text_input("Min Amplicon Length", placeholder="e.g., 100")
     with amp_col2:
-        max_amp = st.text_input("Max Amplicon Length (Optional)", placeholder="e.g., 1500")
+        max_amp = st.text_input("Max Amplicon Length", placeholder="e.g., 1500")
 
 # --- כפתור הרצה ---
 if st.button("🚀 Design Primers", type="primary"):
     if not sequence:
         st.error("Please enter a DNA sequence to proceed.")
     else:
-        with st.spinner('Designing, calculating thermodynamics, and building map...'):
+        with st.spinner('Simulating Reaction and Designing Primers...'):
             try:
                 clean_seq = "".join(sequence.split()).upper()
                 junction_list = [int(x.strip()) for x in junction_pos.split(',') if x.strip().isdigit()] if junction_pos else []
 
+                # הגדרות מנוע החישוב על סמך ערכי הקיט שלך!
                 global_args = {
                     'PRIMER_OPT_SIZE': 20, 'PRIMER_MIN_SIZE': 18, 'PRIMER_MAX_SIZE': 25,
                     'PRIMER_OPT_TM': target_tm, 'PRIMER_MIN_TM': target_tm - 5.0, 'PRIMER_MAX_TM': target_tm + 5.0,
-                    'PRIMER_SALT_DIVALENT': mg_conc, 'PRIMER_NUM_RETURN': num_returns 
+                    
+                    # פרמטרים התואמים את Fast SYBR Master Mix במעבדה שלך:
+                    'PRIMER_DNA_CONC': primer_conc,        # nM
+                    'PRIMER_SALT_DIVALENT': mg_conc,       # mM Mg2+
+                    'PRIMER_SALT_MONOVALENT': 50.0,        # mM K+/Na+
+                    'PRIMER_DNTP_CONC': 0.8,               # mM (total dNTPs)
+                    
+                    # הפעלת מודלים תרמודינמיים מתקדמים
+                    'PRIMER_TM_FORMULA': 1,
+                    'PRIMER_SALT_CORRECTIONS': 1,
+                    'PRIMER_THERMODYNAMIC_OLIGO_ALIGNMENT': 1,
+                    
+                    'PRIMER_NUM_RETURN': num_returns 
                 }
 
                 if min_amp.strip().isdigit() and max_amp.strip().isdigit(): 
@@ -103,7 +125,6 @@ if st.button("🚀 Design Primers", type="primary"):
 
                 final_candidates = []
 
-                # --- לוגיקת Round-Robin ---
                 if junction_list:
                     all_junction_results = []
                     for j in junction_list:
@@ -157,16 +178,14 @@ if st.button("🚀 Design Primers", type="primary"):
                     st.warning("⚠️ No primers found. Try relaxing the constraints.")
                 else:
                     parsed_data = []
-                    blast_details = [] # שומר את הטקסט המפורט להצגה מתחת לטבלה
+                    blast_details = [] 
                     
-                    overhang_note = "Restriction Site" if cloning_type == "Restriction Digestion" else "Vector Overlap" if cloning_type == "Gibson Assembly" else "None"
-
                     for idx, cand in enumerate(final_candidates):
                         f_blast_sum, r_blast_sum = "Skipped", "Skipped"
                         f_blast_det, r_blast_det = "", ""
                         
                         if run_blast_check:
-                            st.toast(f"Running BLAST for Pair {idx+1}...")
+                            st.toast(f"Running Specific BLAST for Pair {idx+1}...")
                             f_blast_sum, f_blast_det = check_and_get_blast(cand['forward_seq'], species_name)
                             time.sleep(1)
                             r_blast_sum, r_blast_det = check_and_get_blast(cand['reverse_seq'], species_name)
@@ -174,7 +193,6 @@ if st.button("🚀 Design Primers", type="primary"):
                             
                         blast_details.append({"F": f_blast_det, "R": r_blast_det})
 
-                        # הטבלה המקורית שלך + Delta G
                         parsed_data.append({
                             "Rank": idx + 1,
                             "Penalty": round(cand['penalty'], 2),
@@ -192,14 +210,13 @@ if st.button("🚀 Design Primers", type="primary"):
                             "R_BLAST": r_blast_sum,
                             "R_Tm (°C)": round(cand['reverse_tm'], 1),
                             "CrossDimer (ΔG)": round(cand['cross_dimer'], 2),
-                            "Amp_Length": cand['product_size'],
-                            "Modification": overhang_note
+                            "Amp_Length": cand['product_size']
                         })
                     
                     df = pd.DataFrame(parsed_data)
                     st.success("✅ Analysis Complete!")
 
-                    # --- המפה הויזואלית המקורית ---
+                    # --- המפה הויזואלית ---
                     st.subheader("🗺️ Amplicon Map")
                     fig = go.Figure()
                     fig.add_shape(type="rect", x0=0, y0=0, x1=len(clean_seq), y1=1, line=dict(color="gray", width=2), fillcolor="lightgray")
@@ -222,9 +239,21 @@ if st.button("🚀 Design Primers", type="primary"):
                                       height=250 + (len(final_candidates) * 30), margin=dict(l=20, r=20, t=30, b=30), plot_bgcolor="white")
                     st.plotly_chart(fig, use_container_width=True)
 
-                    # --- תצוגת הטבלה ---
+                    # --- צביעת הטבלה באדום איפה שסכנת דימרים או Hairpins ---
                     st.markdown("### Detailed Results Table")
-                    st.dataframe(df, use_container_width=True)
+                    
+                    try:
+                        # שימוש ב-map לגרסאות pandas חדשות, וגיבוי ב-applymap לישנות
+                        if hasattr(df.style, "map"):
+                            styled_df = df.style.map(lambda x: color_negative_red(x, -5.0), subset=['F_Self (ΔG)', 'R_Self (ΔG)', 'CrossDimer (ΔG)']) \
+                                                .map(lambda x: color_negative_red(x, -3.0), subset=['F_Hairpin (ΔG)', 'R_Hairpin (ΔG)'])
+                        else:
+                            styled_df = df.style.applymap(lambda x: color_negative_red(x, -5.0), subset=['F_Self (ΔG)', 'R_Self (ΔG)', 'CrossDimer (ΔG)']) \
+                                                .applymap(lambda x: color_negative_red(x, -3.0), subset=['F_Hairpin (ΔG)', 'R_Hairpin (ΔG)'])
+                    except:
+                        styled_df = df # Fallback in case of style rendering issues
+
+                    st.dataframe(styled_df, use_container_width=True)
                     st.download_button("📥 Download Results (CSV)", df.to_csv(index=False).encode('utf-8'), f"{project_name}.csv", "text/csv")
 
                     # --- הצגת ה-BLAST המפורט מתחת לטבלה ---
