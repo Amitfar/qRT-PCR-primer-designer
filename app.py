@@ -30,9 +30,10 @@ def get_detailed_blast(primer_seq, species):
 st.set_page_config(page_title="Cloning Primer Designer", page_icon="🧬", layout="wide")
 st.title("🧬 Cloning Primer Designer (Pro Edition)")
 
-# --- קלט משתמש ---
+# --- ממשק המשתמש ---
 col1, col2 = st.columns([2, 1])
-with col1: sequence = st.text_area("Target Sequence (5' to 3'):", height=200)
+with col1: 
+    sequence = st.text_area("Target Sequence (5' to 3'):", height=200, placeholder="Paste your sequence here...")
 with col2:
     project_name = st.text_input("Project Name:", "My_Cloning")
     species_name = st.text_input("Species (for BLAST):", "Solanum tuberosum")
@@ -49,57 +50,57 @@ with st.expander("⚙️ Advanced Thermodynamics & Settings"):
         max_amp = st.text_input("Max Amplicon", "1000")
 
 if st.button("🚀 Design Primers", type="primary"):
-    if not sequence: st.error("Please enter a sequence.")
+    if not sequence: st.error("Please enter a DNA sequence.")
     else:
         with st.spinner('Calculating thermodynamics and secondary structures...'):
-            clean_seq = "".join(sequence.split()).upper()
-            junction_list = [int(x.strip()) for x in junction_pos.split(',') if x.strip().isdigit()] if junction_pos else []
-            
-            global_args = {
-                'PRIMER_OPT_SIZE': 20, 'PRIMER_OPT_TM': target_tm,
-                'PRIMER_NUM_RETURN': num_returns,
-                'PRIMER_THERMODYNAMIC_PARAMETERS_PATH': primer3.bindings.get_parameter_path()
-            }
-            if min_amp.isdigit() and max_amp.isdigit(): global_args['PRIMER_PRODUCT_SIZE_RANGE'] = [[int(min_amp), int(max_amp)]]
+            try:
+                clean_seq = "".join(sequence.split()).upper()
+                junction_list = [int(x.strip()) for x in junction_pos.split(',') if x.strip().isdigit()] if junction_pos else []
+                
+                # הסרנו את השורה הבעייתית של ה-path
+                global_args = {
+                    'PRIMER_OPT_SIZE': 20, 
+                    'PRIMER_OPT_TM': target_tm,
+                    'PRIMER_NUM_RETURN': num_returns
+                }
+                
+                if min_amp.strip().isdigit() and max_amp.strip().isdigit():
+                    global_args['PRIMER_PRODUCT_SIZE_RANGE'] = [[int(min_amp.strip()), int(max_amp.strip())]]
 
-            final_candidates = []
-            # (לוגיקת ה-Round-Robin הושארה כפי שהייתה)
-            seq_args = {'SEQUENCE_ID': project_name, 'SEQUENCE_TEMPLATE': clean_seq}
-            if junction_list: seq_args['SEQUENCE_OVERLAP_JUNCTION_LIST'] = junction_list
-            
-            raw_res = primer3.bindings.designPrimers(seq_args, global_args)
-            
-            parsed_data = []
-            for i in range(raw_res.get('PRIMER_PAIR_NUM_RETURNED', 0)):
-                # שליפת ערכי ה-Delta G עבור דימרים ו-Hairpins
-                f_hairpin = round(raw_res.get(f'PRIMER_LEFT_{i}_HAIRPIN_TH', 0), 2)
-                r_hairpin = round(raw_res.get(f'PRIMER_RIGHT_{i}_HAIRPIN_TH', 0), 2)
-                f_self_any = round(raw_res.get(f'PRIMER_LEFT_{i}_SELF_ANY_TH', 0), 2)
-                r_self_any = round(raw_res.get(f'PRIMER_RIGHT_{i}_SELF_ANY_TH', 0), 2)
-                cross_dimer = round(raw_res.get(f'PRIMER_PAIR_{i}_COMPL_ANY_TH', 0), 2)
+                seq_args = {'SEQUENCE_ID': project_name, 'SEQUENCE_TEMPLATE': clean_seq}
+                if junction_list:
+                    seq_args['SEQUENCE_OVERLAP_JUNCTION_LIST'] = junction_list
 
-                parsed_data.append({
-                    "Rank": i + 1,
-                    "Penalty": round(raw_res.get(f'PRIMER_PAIR_{i}_PENALTY', 0), 2),
-                    "F_Seq": raw_res.get(f'PRIMER_LEFT_{i}_SEQUENCE'),
-                    "R_Seq": raw_res.get(f'PRIMER_RIGHT_{i}_SEQUENCE'),
-                    "F_Hairpin (ΔG)": f_hairpin,
-                    "R_Hairpin (ΔG)": r_hairpin,
-                    "F_SelfDimer (ΔG)": f_self_any,
-                    "R_SelfDimer (ΔG)": r_self_any,
-                    "Pair_CrossDimer (ΔG)": cross_dimer,
-                    "Product_Size": raw_res.get(f'PRIMER_PAIR_{i}_PRODUCT_SIZE')
-                })
-            
-            df = pd.DataFrame(parsed_data)
-            st.success("Analysis Complete!")
-            st.dataframe(df, use_container_width=True)
+                raw_res = primer3.bindings.designPrimers(seq_args, global_args)
+                
+                if raw_res.get('PRIMER_PAIR_NUM_RETURNED', 0) == 0:
+                    st.warning("No primers found. Try relaxing the constraints.")
+                else:
+                    parsed_data = []
+                    for i in range(raw_res.get('PRIMER_PAIR_NUM_RETURNED', 0)):
+                        parsed_data.append({
+                            "Rank": i + 1,
+                            "Penalty": round(raw_res.get(f'PRIMER_PAIR_{i}_PENALTY', 0), 2),
+                            "F_Seq": raw_res.get(f'PRIMER_LEFT_{i}_SEQUENCE'),
+                            "R_Seq": raw_res.get(f'PRIMER_RIGHT_{i}_SEQUENCE'),
+                            "F_Hairpin (ΔG)": round(raw_res.get(f'PRIMER_LEFT_{i}_HAIRPIN_TH', 0), 2),
+                            "R_Hairpin (ΔG)": round(raw_res.get(f'PRIMER_RIGHT_{i}_HAIRPIN_TH', 0), 2),
+                            "F_SelfDimer (ΔG)": round(raw_res.get(f'PRIMER_LEFT_{i}_SELF_ANY_TH', 0), 2),
+                            "R_SelfDimer (ΔG)": round(raw_res.get(f'PRIMER_RIGHT_{i}_SELF_ANY_TH', 0), 2),
+                            "Pair_CrossDimer (ΔG)": round(raw_res.get(f'PRIMER_PAIR_{i}_COMPL_ANY_TH', 0), 2),
+                            "Product_Size": raw_res.get(f'PRIMER_PAIR_{i}_PRODUCT_SIZE')
+                        })
+                    
+                    df = pd.DataFrame(parsed_data)
+                    st.success("✅ Analysis Complete!")
+                    st.dataframe(df, use_container_width=True)
 
-            # הצגת ה-BLAST המפורט מתחת לטבלה
-            if run_blast_check:
-                for idx, row in df.iterrows():
-                    with st.expander(f"🔍 BLAST Detailed Alignment - Candidate {idx+1}"):
-                        st.subheader("Forward Primer Alignment")
-                        st.code(get_detailed_blast(row['F_Seq'], species_name))
-                        st.subheader("Reverse Primer Alignment")
-                        st.code(get_detailed_blast(row['R_Seq'], species_name))
+                    if run_blast_check:
+                        for idx, row in df.iterrows():
+                            with st.expander(f"🔍 BLAST Detailed Alignment - Candidate {idx+1}"):
+                                st.subheader("Forward Primer Alignment")
+                                st.code(get_detailed_blast(row['F_Seq'], species_name))
+                                st.subheader("Reverse Primer Alignment")
+                                st.code(get_detailed_blast(row['R_Seq'], species_name))
+            except Exception as e:
+                st.error(f"An error occurred: {e}")
