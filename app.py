@@ -12,10 +12,12 @@ Entrez.email = "spud_researcher@example.com"
 # --- NCBI Taxonomy Search Logic ---
 @st.cache_data(show_spinner=False)
 def fetch_ncbi_species_with_common(query):
+    query = query.strip()
     if not query or len(query) < 3:
         return []
     try:
-        handle = Entrez.esearch(db="taxonomy", term=f"{query}[Scientific Name]", retmax=50)
+        # Added '*' for wildcard matching (Autocomplete behavior)
+        handle = Entrez.esearch(db="taxonomy", term=f"{query}*[Scientific Name]", retmax=50)
         record = Entrez.read(handle)
         handle.close()
         
@@ -122,12 +124,12 @@ with col1:
 with col2:
     project_name = st.text_input("Project Name:", "My_Gene_Cloning")
     
-    # Clean, compact species search logic
-    species_query = st.text_input("Species (Type & press Enter):", "Solanum")
+    st.markdown("**Species (Type & press Enter):**")
+    # Using a clean input without label duplication
+    species_query = st.text_input("Search Taxonomy", value="Vanilla", label_visibility="collapsed")
     species_options = fetch_ncbi_species_with_common(species_query)
     
     if species_options:
-        # Show dropdown without a label to avoid visual clutter
         selected_full_name = st.selectbox("Select match:", options=species_options, label_visibility="collapsed")
         species_for_blast = selected_full_name.split(" (")[0]
     else:
