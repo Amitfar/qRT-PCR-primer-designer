@@ -1,47 +1,65 @@
 import streamlit as st
 import primer3
 import pandas as pd
-import time
-import re
 import plotly.graph_objects as go
 from Bio.Blast import NCBIWWW
 from Bio.Blast import NCBIXML
 from Bio import Entrez
 
-# Required by NCBI to track usage and avoid blocking. 
-# Please replace with your actual email address.
+# Configuration for NCBI
 Entrez.email = "spud_researcher@example.com" 
+
+# --- NCBI Taxonomy Search Logic ---
+@st.cache_data(show_spinner=False)
+def fetch_ncbi_species_with_common(query):
+    """
+    Fetches scientific names and common names from NCBI.
+    Returns a list formatted as 'Scientific Name (common name)'.
+    """
+    if not query or len(query) < 3:
+        return []
+    try:
+        # Search Taxonomy ID (increased retmax to match the screenshot scope)
+        handle = Entrez.esearch(db="taxonomy", term=f"{query}[Scientific Name]", retmax=50)
+        record = Entrez.read(handle)
+        handle.close()
+        
+        ids = record["IdList"]
+        if not ids: return []
+            
+        # Fetch detailed records to get common names
+        handle = Entrez.efetch(db="taxonomy", id=",".join(ids), retmode="xml")
+        records = Entrez.read(handle)
+        handle.close()
+        
+        formatted_names = []
+        for r in records:
+            sci_name = r.get("ScientificName", "")
+            common_name = ""
+            
+            # Safely extract common name to prevent KeyErrors
+            if "OtherNames" in r:
+                other_names = r["OtherNames"]
+                if "GenbankCommonName" in other_names and other_names["GenbankCommonName"]:
+                    common_name = other_names["GenbankCommonName"]
+                elif "CommonName" in other_names and other_names["CommonName"]:
+                    c_name_data = other_names["CommonName"]
+                    common_name = c_name_data[0] if isinstance(c_name_data, list) else c_name_data
+            
+            if common_name:
+                formatted_names.append(f"{sci_name} ({common_name})")
+            else:
+                formatted_names.append(sci_name)
+                
+        # Remove duplicates while maintaining order
+        return list(dict.fromkeys(formatted_names))
+    except Exception as e:
+        return [query]
 
 # --- Helper Functions & Thermodynamics ---
 def rev_comp(seq):
     complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A'}
     return "".join(complement.get(base, base) for base in reversed(seq.upper()))
-
-@st.cache_data(show_spinner=False)
-def get_ncbi_taxonomy(query):
-    """Fetches scientific names from NCBI Taxonomy dynamically."""
-    if not query or len(query) < 3: 
-        return [query] if query else []
-    try:
-        # Search for the term in the taxonomy database
-        handle = Entrez.esearch(db="taxonomy", term=f"{query}[Scientific Name]", retmax=15)
-        record = Entrez.read(handle)
-        handle.close()
-        
-        ids = record["IdList"]
-        if not ids: 
-            return [query] # Fallback to user input if nothing found
-            
-        # Fetch the actual scientific names using the IDs
-        handle = Entrez.efetch(db="taxonomy", id=",".join(ids), retmode="xml")
-        records = Entrez.read(handle)
-        handle.close()
-        
-        # Extract and return unique scientific names
-        names = [r["ScientificName"] for r in records]
-        return list(dict.fromkeys(names)) # Remove duplicates while preserving order
-    except Exception as e:
-        return [query] # Fallback on connection error
 
 def check_and_get_blast(primer_seq, species):
     try:
@@ -97,66 +115,54 @@ def color_sec_struct(val):
     elif val == 'v': return 'color: green; font-weight: bold; text-align: center;'
     return ''
 
-# --- Page Configuration ---
-st.set_page_config(page_title="SPUD - Primer Designer", page_icon="🧬", layout="wide")
+# --- Page Setup ---
+st.set_page_config(page_title="SPUD - NCBI Integrated", page_icon="🧬", layout="wide")
 
-# --- Documentation Sidebar ---
-with st.sidebar:
-    st.title("📖 SPUD Documentation")
-    st.markdown("Welcome to **SPUD** (Specific Primer Universal Designer).")
-    
-    with st.expander("🔄 1. The SPUD Workflow"):
-        st.write("""
-        1. **Design & Distribute:** Generates raw primers, forcibly selecting candidates evenly across all provided Exon-Exon junctions (Round-Robin).
-        2. **Thermodynamic Penalty:** Calculates standard Primer3 penalties + strict UNAFold-like penalties for template secondary structures.
-        3. **BLAST Gatekeeper (Optional):** Screens the top candidates against NCBI. Any pair with >1 hit is pushed to the bottom of the list.
-        4. **Final Sort:** Prioritizes specificity (BLAST) while strictly maintaining the diverse junction distribution.
-        """)
-        
-    with st.expander("🎛️ 2. Input Parameters (What you can tweak)"):
-        st.write("""
-        * **Target Sequence:** Your full gene/cDNA FASTA sequence.
-        * **Species:** Dynamically searches NCBI Taxonomy to ensure exact matching for BLAST.
-        * **Exon-Exon Junctions:** Base-pair indexes where exons meet. SPUD will span primers across these points.
-        * **Primer / Mg2+ Conc:** Calibrated by default to Fast SYBR® Green. Adjust only if using a different Master Mix.
-        * **Target Tm:** The ideal melting temperature for your reaction.
-        * **Amplicon Length:** Keep between 80-150 for optimal qPCR efficiency.
-        """)
+# Initialize Session State for Species List
+if "species_options" not in st.session_state:
+    st.session_state.species_options = ["Solanum tuberosum (potato)"]
 
-    with st.expander("📊 3. Output Parameters (Reading the Table)"):
-        st.write("""
-        * **Penalty:** Objective score. Lower is better.
-        * **ΔG (Gibbs Free Energy):** Measures structure stability in *kcal/mol*. 
-          * *Self / Cross Dimers:* Safe if > -5.0. If lower (red), they may form primer-dimers.
-          * *Hairpins:* Safe if > -3.0. If lower (red), the primer folds on itself.
-        * **BLAST:** Target specificity. "1 Hit ✅" is ideal. >1 Hit (red) means off-target binding risk.
-        * **Template_Fold (v / !):** Evaluates the DNA template (Amplicon). If marked with "!", the template forms a stable secondary structure within 3°C of your primer's Tm, risking amplification failure.
-        """)
-
-# --- Main Header ---
+# --- Custom NCBI-Style Search UI ---
 st.title("🧬 SPUD: Specific Primer Universal Designer")
-st.markdown("""
-**SPUD** is a high-precision tool for plant scientists, calibrated for **Fast SYBR® Green** reactions. 
-It features smart exon-junction distribution, real-time **ΔG** screening, template UNAFold-like risk assessment, 
-and automated **Locus Tag** identification for any species via dynamic NCBI Taxonomy integration.
-""")
+
+st.markdown("### Search term")
+search_col, button_col = st.columns([5, 1])
+
+with search_col:
+    search_query = st.text_input(
+        label="Search term", 
+        value="solanum", 
+        label_visibility="collapsed", 
+        key="species_search_input"
+    )
+
+with button_col:
+    if st.button("Search", type="primary", use_container_width=True):
+        with st.spinner("Searching NCBI Taxonomy..."):
+            results = fetch_ncbi_species_with_common(search_query)
+            if results:
+                st.session_state.species_options = results
+            else:
+                st.warning("No results found.")
+
+selected_full_name = st.selectbox(
+    "Select specific organism from results:", 
+    options=st.session_state.species_options
+)
+
+# Extract only the scientific name for BLAST
+species_for_blast = selected_full_name.split(" (")[0]
+st.info(f"Target Species locked: **{species_for_blast}**")
+
 st.divider()
 
-# --- User Interface ---
+# --- Inputs ---
 col1, col2 = st.columns([2, 1])
 with col1: 
     sequence = st.text_area("Target Sequence (5' to 3'):", height=200, placeholder="Paste your FASTA sequence...")
 
 with col2:
     project_name = st.text_input("Project Name:", "My_Gene_Cloning")
-    
-    # Dynamic NCBI Species Search integration
-    species_query = st.text_input("Species Search (type & press Enter):", "Solanum tuberosum")
-    with st.spinner("Fetching taxonomy..."):
-        species_options = get_ncbi_taxonomy(species_query)
-    
-    species_name = st.selectbox("Confirm Organism (for BLAST):", options=species_options)
-    
     junction_pos = st.text_input("Exon-Exon Junctions:", placeholder="e.g., 72, 478")
     run_blast_check = st.checkbox("🔍 Run NCBI BLAST (Gatekeeper Mode)")
 
@@ -186,11 +192,11 @@ if st.button("🚀 Design Primers", type="primary"):
                     'PRIMER_DNA_CONC': primer_conc, 'PRIMER_SALT_DIVALENT': mg_conc, 
                     'PRIMER_SALT_MONOVALENT': 50.0, 'PRIMER_DNTP_CONC': 0.8,
                     'PRIMER_TM_FORMULA': 1, 'PRIMER_SALT_CORRECTIONS': 1, 'PRIMER_THERMODYNAMIC_OLIGO_ALIGNMENT': 1,
-                    'PRIMER_NUM_RETURN': max(15, num_returns * 3) # Generate wide pool for filtering
+                    'PRIMER_NUM_RETURN': max(15, num_returns * 3)
                 }
                 if min_amp.isdigit() and max_amp.isdigit(): global_args['PRIMER_PRODUCT_SIZE_RANGE'] = [[int(min_amp), int(max_amp)]]
 
-                pools = [] # List of lists (each item is a list of candidates from a specific exon)
+                pools = [] 
                 
                 if junction_list:
                     for j in junction_list:
@@ -223,7 +229,6 @@ if st.button("🚀 Design Primers", type="primary"):
                 if not pools: 
                     st.warning("⚠️ No primers found. Try relaxing the constraints.")
                 else:
-                    # Step 1: Calculate Template Penalty for all candidates across all exons
                     for pool in pools:
                         for cand in pool:
                             f_temp_tm = primer3.calc_hairpin(rev_comp(cand['forward_seq'])).tm
@@ -233,10 +238,8 @@ if st.button("🚀 Design Primers", type="primary"):
                                 cand['penalty'] += 50.0 
                             else: 
                                 cand['Template_SecStruct'] = "v"
-                        # Internal sorting of each exon pool by new penalty score
                         pool.sort(key=lambda x: x['penalty'])
 
-                    # Step 2: Round-Robin extraction to maintain even distribution among exons
                     candidates_to_process = []
                     max_cands = max(len(p) for p in pools)
                     rr_counter = 0
@@ -244,20 +247,18 @@ if st.button("🚀 Design Primers", type="primary"):
                         for pool in pools:
                             if i < len(pool):
                                 cand = pool[i]
-                                cand['rr_rank'] = rr_counter # Preserve relative order to avoid losing distribution
+                                cand['rr_rank'] = rr_counter
                                 candidates_to_process.append(cand)
                                 rr_counter += 1
                     
-                    # Truncate to a reasonable amount so BLAST doesn't take forever
                     candidates_to_process = candidates_to_process[:max(10, num_returns * 2)]
                     blast_details = []
 
-                    # Step 3: BLAST Gatekeeper
                     if run_blast_check:
                         for idx, cand in enumerate(candidates_to_process):
                             st.toast(f"BLASTing Candidate {idx+1}/{len(candidates_to_process)}...")
-                            f_sum, f_det = check_and_get_blast(cand['forward_seq'], species_name)
-                            r_sum, r_det = check_and_get_blast(cand['reverse_seq'], species_name)
+                            f_sum, f_det = check_and_get_blast(cand['forward_seq'], species_for_blast)
+                            r_sum, r_det = check_and_get_blast(cand['reverse_seq'], species_for_blast)
                             cand['f_blast_sum'], cand['f_blast_det'] = f_sum, f_det
                             cand['r_blast_sum'], cand['r_blast_det'] = r_sum, r_det
                             
@@ -268,7 +269,6 @@ if st.button("🚀 Design Primers", type="primary"):
                             
                             cand['blast_bad'] = 1 if (f_hits > 1 or r_hits > 1) else 0
                         
-                        # Step 4: Final Sort - Gatekeeper first, then preserve Round-Robin order
                         candidates_to_process.sort(key=lambda x: (x.get('blast_bad', 0), x['rr_rank']))
                         final_candidates = candidates_to_process[:num_returns]
                         
@@ -276,13 +276,11 @@ if st.button("🚀 Design Primers", type="primary"):
                             blast_details.append({"F": cand['f_blast_det'], "R": cand['r_blast_det']})
 
                     else:
-                        # If BLAST is off, just take the clean Round-Robin list
                         final_candidates = candidates_to_process[:num_returns]
                         for cand in final_candidates:
                             cand['f_blast_sum'] = "Skipped"
                             cand['r_blast_sum'] = "Skipped"
 
-                    # Step 5: Build final DataFrame
                     parsed_data = []
                     for idx, cand in enumerate(final_candidates):
                         f_seq = cand['forward_seq']
@@ -312,7 +310,6 @@ if st.button("🚀 Design Primers", type="primary"):
                     df = pd.DataFrame(parsed_data)
                     st.success("✅ Analysis Complete!")
 
-                    # --- Visual Map Display ---
                     st.subheader("🗺️ Amplicon Map")
                     fig = go.Figure()
                     fig.add_shape(type="rect", x0=0, y0=0, x1=len(clean_seq), y1=1, line=dict(color="gray", width=2), fillcolor="lightgray")
@@ -335,7 +332,6 @@ if st.button("🚀 Design Primers", type="primary"):
                                       height=250 + (len(final_candidates) * 30), margin=dict(l=20, r=20, t=30, b=30), plot_bgcolor="white")
                     st.plotly_chart(fig, use_container_width=True)
 
-                    # --- Formatted Final Table ---
                     st.markdown("### Detailed Results Table")
                     try:
                         styled_df = df.style.format(precision=1)
@@ -355,7 +351,6 @@ if st.button("🚀 Design Primers", type="primary"):
                     st.dataframe(styled_df, use_container_width=True)
                     st.download_button("📥 Download Results (CSV)", df.to_csv(index=False).encode('utf-8'), f"{project_name}.csv", "text/csv")
 
-                    # --- Detailed BLAST Display ---
                     if run_blast_check:
                         st.markdown("### 🔍 BLAST Alignments")
                         for idx, detail in enumerate(blast_details):
