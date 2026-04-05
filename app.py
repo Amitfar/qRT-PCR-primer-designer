@@ -10,14 +10,15 @@ from Bio import Entrez
 Entrez.email = "spud_researcher@example.com" 
 
 # --- NCBI Taxonomy Search Logic ---
+# Changed the function name slightly to bust Streamlit's cache
 @st.cache_data(show_spinner=False)
-def fetch_ncbi_species_with_common(query):
+def fetch_ncbi_tax_options(query):
     query = query.strip()
     if not query or len(query) < 3:
         return []
     try:
-        # Added '*' for wildcard matching (Autocomplete behavior)
-        handle = Entrez.esearch(db="taxonomy", term=f"{query}*[Scientific Name]", retmax=50)
+        # Removed the restrictive [Scientific Name] tag so the wildcard (*) works properly
+        handle = Entrez.esearch(db="taxonomy", term=f"{query}*", retmax=50)
         record = Entrez.read(handle)
         handle.close()
         
@@ -125,9 +126,10 @@ with col2:
     project_name = st.text_input("Project Name:", "My_Gene_Cloning")
     
     st.markdown("**Species (Type & press Enter):**")
-    # Using a clean input without label duplication
-    species_query = st.text_input("Search Taxonomy", value="Vanilla", label_visibility="collapsed")
-    species_options = fetch_ncbi_species_with_common(species_query)
+    species_query = st.text_input("Search Taxonomy", value="Solanum", label_visibility="collapsed")
+    
+    # Called the new function name here
+    species_options = fetch_ncbi_tax_options(species_query)
     
     if species_options:
         selected_full_name = st.selectbox("Select match:", options=species_options, label_visibility="collapsed")
@@ -301,35 +303,4 @@ if st.button("🚀 Design Primers", type="primary"):
 
                     fig.update_layout(xaxis=dict(range=[-20, len(clean_seq)+20], title="Position (bp)"), 
                                       yaxis=dict(showticklabels=False, range=[-0.5, max_y + 0.5]), 
-                                      height=250 + (len(final_candidates) * 30), margin=dict(l=20, r=20, t=30, b=30), plot_bgcolor="white")
-                    st.plotly_chart(fig, use_container_width=True)
-
-                    st.markdown("### Detailed Results Table")
-                    try:
-                        styled_df = df.style.format(precision=1)
-                        if hasattr(styled_df, "map"):
-                            styled_df = styled_df.map(lambda x: color_negative_red(x, -5.0), subset=['F_Self (ΔG)', 'R_Self (ΔG)', 'CrossDimer (ΔG)']) \
-                                                 .map(lambda x: color_negative_red(x, -3.0), subset=['F_Hairpin (ΔG)', 'R_Hairpin (ΔG)']) \
-                                                 .map(color_blast_red, subset=['F_BLAST', 'R_BLAST']) \
-                                                 .map(color_sec_struct, subset=['Template_Fold'])
-                        else:
-                            styled_df = styled_df.applymap(lambda x: color_negative_red(x, -5.0), subset=['F_Self (ΔG)', 'R_Self (ΔG)', 'CrossDimer (ΔG)']) \
-                                                 .applymap(lambda x: color_negative_red(x, -3.0), subset=['F_Hairpin (ΔG)', 'R_Hairpin (ΔG)']) \
-                                                 .applymap(color_blast_red, subset=['F_BLAST', 'R_BLAST']) \
-                                                 .applymap(color_sec_struct, subset=['Template_Fold'])
-                    except:
-                        styled_df = df
-
-                    st.dataframe(styled_df, use_container_width=True)
-                    st.download_button("📥 Download Results (CSV)", df.to_csv(index=False).encode('utf-8'), f"{project_name}.csv", "text/csv")
-
-                    if run_blast_check:
-                        st.markdown("### 🔍 BLAST Alignments")
-                        for idx, detail in enumerate(blast_details):
-                            with st.expander(f"View Alignments for Candidate {idx+1}"):
-                                st.write("**Forward Primer:**")
-                                st.code(detail["F"], language="text")
-                                st.write("**Reverse Primer:**")
-                                st.code(detail["R"], language="text")
-
-            except Exception as e: st.error(f"Error executing analysis: {e}")
+                                      height=250 + (len(final_candidates) * 30), margin=dict(l=2
