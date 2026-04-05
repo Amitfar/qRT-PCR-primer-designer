@@ -1,10 +1,14 @@
 import streamlit as st
 import primer3
 import pandas as pd
-import plotly.graph_objects as go
+import io
+import time
 from Bio.Blast import NCBIWWW
 from Bio.Blast import NCBIXML
 from Bio import Entrez
+
+# Configuration for NCBI
+Entrez.email = "spud_researcher@example.com" 
 
 # --- Helper Functions & Thermodynamics ---
 def rev_comp(seq):
@@ -14,311 +18,252 @@ def rev_comp(seq):
 def check_and_get_blast(primer_seq, species):
     try:
         entrez_query = f"{species}[organism]" if species else ""
-        handle = NCBIWWW.qblast("blastn", "nt", primer_seq, entrez_query=entrez_query, word_size=11, hitlist_size=5)
+        handle = NCBIWWW.qblast("blastn", "nt", primer_seq, entrez_query=entrez_query, word_size=11, hitlist_size=3)
         blast_record = NCBIXML.read(handle)
-        report = []
         significant_hits = 0
         primer_len = len(primer_seq)
         for alignment in blast_record.alignments:
             for hsp in alignment.hsps:
                 if hsp.align_length >= primer_len * 0.9:
                     significant_hits += 1
-                    tags = []
-                    for word in alignment.title.split():
-                        clean_word = word.strip("()[],:;")
-                        if any(c.isalpha() for c in clean_word) and any(c.isdigit() for c in clean_word) and len(clean_word) > 4:
-                            tags.append(clean_word)
-                    unique_tags = list(dict.fromkeys(tags))[:3]
-                    locus_text = ", ".join(unique_tags) if unique_tags else "N/A"
-                    gene_desc = alignment.hit_def[:80] + "..." if len(alignment.hit_def) > 80 else alignment.hit_def
-                    detail = (
-                        f"Locus / Gene ID: {locus_text}\n"
-                        f"Description: {gene_desc}\n"
-                        f"NCBI Acc: {alignment.accession} | Identity: {hsp.identities}/{hsp.align_length}\n"
-                        f"Query:  {hsp.query}\n"
-                        f"Match:  {hsp.match}\n"
-                        f"Sbjct:  {hsp.sbjct}\n"
-                        "--------------------------------------------------"
-                    )
-                    report.append(detail)
-        detailed_text = "\n".join(report) if report else "No significant hits found (>90% coverage)."
-        summary = f"{significant_hits} Hits" if significant_hits > 1 else "1 Hit ✅" if significant_hits == 1 else "0 Hits ✅"
-        return summary, detailed_text
-    except Exception as e: return "Error", str(e)
+        return f"{significant_hits} Hits" if significant_hits > 1 else "1 Hit ✅" if significant_hits == 1 else "0 Hits ✅"
+    except Exception as e: return "Error"
 
-# --- Table Styling Functions ---
-def color_negative_red(val, threshold):
-    try:
-        if float(val) < threshold: return 'background-color: #ffcccc; color: red; font-weight: bold;'
-    except: pass
-    return ''
+def parse_target(target_str):
+    """Parses the Smart Input into Global, Junction, or ROI"""
+    target_str = str(target_str).strip()
+    if not target_str or target_str.lower() in ['nan', 'none']:
+        return "Global", None
+    if '-' in target_str:
+        try:
+            start, end = map(int, target_str.split('-'))
+            return "ROI", [start, end]
+        except: return "Error", None
+    if target_str.isdigit():
+        return "Junction", int(target_str)
+    return "Error", None
 
-def color_blast_red(val):
-    try:
-        hits = int(str(val).split()[0])
-        if hits > 1: return 'background-color: #ffcccc; color: red; font-weight: bold;'
-    except: pass
-    return ''
-
-def color_sec_struct(val):
-    if val == '!': return 'background-color: #ffcccc; color: red; font-weight: bold; text-align: center;'
-    elif val == 'v': return 'color: green; font-weight: bold; text-align: center;'
-    return ''
+def validate_7bp_anchor(primer_start, primer_length, junction, is_reverse=False):
+    """Validates that a primer spanning a junction has at least 7bp on each side."""
+    if is_reverse:
+        # Reverse primer is given by its 5' end (highest index)
+        r_end = primer_start - primer_length + 1
+        # Overlap requires starting at least 7bp after junction, and ending at least 7bp before
+        return (primer_start >= junction + 7) and (r_end <= junction - 6)
+    else:
+        # Forward primer is given by its 5' end (lowest index)
+        f_end = primer_start + primer_length - 1
+        return (primer_start <= junction - 7) and (f_end >= junction + 6)
 
 # --- Page Setup ---
-st.set_page_config(page_title="SPUD - Primer Designer", page_icon="🧬", layout="wide")
-
-# --- Documentation Sidebar ---
-with st.sidebar:
-    st.title("📖 SPUD Documentation")
-    st.markdown("Welcome to **SPUD** (Specific Primer Universal Designer).")
-    
-    with st.expander("🔄 1. The SPUD Workflow"):
-        st.write("""
-        1. **Design & Distribute:** Generates raw primers, forcibly selecting candidates evenly across all provided Exon-Exon junctions (Round-Robin).
-        2. **Thermodynamic Penalty:** Calculates standard Primer3 penalties + strict UNAFold-like penalties for template secondary structures.
-        3. **BLAST Gatekeeper (Optional):** Screens the top candidates against NCBI. Any pair with >1 hit is pushed to the bottom of the list.
-        4. **Final Sort:** Prioritizes specificity (BLAST) while strictly maintaining the diverse junction distribution.
-        """)
-        
-    with st.expander("🎛️ 2. Input Parameters (What you can tweak)"):
-        st.write("""
-        * **Target Sequence:** Your full gene/cDNA FASTA sequence.
-        * **Species:** Scientific name (e.g., *Solanum tuberosum*). Crucial for accurate BLAST results.
-        * **Exon-Exon Junctions:** Base-pair indexes where exons meet. SPUD will span primers across these points.
-        * **Primer / Mg2+ Conc:** Calibrated by default to Fast SYBR® Green. Adjust only if using a different Master Mix.
-        * **Target Tm:** The ideal melting temperature for your reaction.
-        * **Amplicon Length:** Keep between 80-150 for optimal qPCR efficiency.
-        """)
-
-    with st.expander("📊 3. Output Parameters (Reading the Table)"):
-        st.write("""
-        * **Penalty:** Objective score. Lower is better.
-        * **ΔG (Gibbs Free Energy):** Measures structure stability in *kcal/mol*. 
-          * *Self / Cross Dimers:* Safe if > -5.0. If lower (red), they may form primer-dimers.
-          * *Hairpins:* Safe if > -3.0. If lower (red), the primer folds on itself.
-        * **BLAST:** Target specificity. "1 Hit ✅" is ideal. >1 Hit (red) means off-target binding risk.
-        * **Template_Fold (v / !):** Evaluates the DNA template (Amplicon). If marked with "!", the template forms a stable secondary structure within 3°C of your primer's Tm, risking amplification failure.
-        """)
-
-# --- Main Header ---
-st.title("🧬 SPUD: Specific Primer Universal Designer")
-st.markdown("""
-**SPUD** is a high-precision tool for plant scientists, calibrated for **Fast SYBR® Green** reactions. 
-It features smart exon-junction distribution, real-time **ΔG** screening, template UNAFold-like risk assessment, 
-and automated **Locus Tag** identification for any plant species via NCBI BLAST.
-""")
+st.set_page_config(page_title="SPUD - Batch Mode", page_icon="🧬", layout="wide")
+st.title("🧬 SPUD: Specific Primer Universal Designer (Batch Edition)")
 st.divider()
 
-# --- User Interface ---
-col1, col2 = st.columns([2, 1])
-with col1: 
-    sequence = st.text_area("Target Sequence (5' to 3'):", height=200, placeholder="Paste your FASTA sequence...")
-with col2:
-    project_name = st.text_input("Project Name:", "My_Gene_Cloning")
-    species_name = st.text_input("Species (for BLAST):", "Solanum tuberosum")
-    junction_pos = st.text_input("Exon-Exon Junctions:", placeholder="e.g., 72, 478")
-    run_blast_check = st.checkbox("🔍 Run NCBI BLAST (Gatekeeper Mode)")
+# --- Top Settings (Global Conditions) ---
+with st.expander("⚙️ Lab Conditions & Advanced Thermodynamics (Applied to all)", expanded=True):
+    col1, col2, col3, col4 = st.columns(4)
+    with col1: 
+        species_name = st.text_input("Global Species (for BLAST):", "Solanum tuberosum")
+        num_returns = st.slider("Max Candidates per Gene", 1, 10, 3, step=1)
+    with col2: 
+        primer_conc = st.number_input("Primer Conc. (nM)", value=250.0, step=10.0)
+        mg_conc = st.number_input("Mg2+ Conc. (mM)", value=2.5, step=0.1)
+    with col3: 
+        target_tm = st.slider("Target Tm (°C)", 50.0, 72.0, 60.0, step=0.5)
+    with col4: 
+        min_amp = st.text_input("Min Amplicon Length", value="80")
+        max_amp = st.text_input("Max Amplicon Length", value="150")
+        run_blast_check = st.checkbox("🔍 Run BLAST on Rank 1")
 
-with st.expander("⚙️ Advanced Thermodynamics (Fast SYBR Green)"):
-    adv_col1, adv_col2, adv_col3, adv_col4 = st.columns(4)
-    with adv_col1: primer_conc = st.number_input("Primer Conc. (nM)", value=250.0, step=10.0)
-    with adv_col2: mg_conc = st.number_input("Mg2+ Conc. (mM)", value=2.5, step=0.1)
-    with adv_col3: target_tm = st.slider("Target Tm (°C)", 50.0, 72.0, 60.0, step=0.5)
-    with adv_col4: num_returns = st.slider("Total Primers to Design", 1, 15, 5, step=1)
+# --- Mode Selection ---
+mode = st.radio("Select Processing Mode:", ["Batch Upload (CSV/Excel)", "Single Gene (Quick Test)"], horizontal=True)
+
+genes_data = []
+
+if mode == "Batch Upload (CSV/Excel)":
+    st.info("Upload a file with columns: **Gene_ID**, **Sequence**, **Target** (Leave empty for Global, single number for Junction, range 'Start-End' for ROI).")
     
-    st.markdown("<br>", unsafe_allow_html=True)
-    amp_col1, amp_col2, _, _ = st.columns(4)
-    with amp_col1: min_amp = st.text_input("Min Amplicon Length", value="80")
-    with amp_col2: max_amp = st.text_input("Max Amplicon Length", value="150")
+    # Template Download
+    template_df = pd.DataFrame({"Gene_ID": ["StPOT1", "StGA2ox", "StActin"], "Sequence": ["ATGC...", "TTGC...", "CCGG..."], "Target": ["452", "300-450", ""]})
+    csv_buffer = io.BytesIO()
+    template_df.to_csv(csv_buffer, index=False)
+    st.download_button(label="📥 Download Template", data=csv_buffer.getvalue(), file_name="SPUD_Template.csv", mime="text/csv")
+    
+    uploaded_file = st.file_uploader("Upload Batch File", type=['csv', 'xlsx'])
+    if uploaded_file:
+        try:
+            if uploaded_file.name.endswith('.csv'): df_input = pd.read_csv(uploaded_file)
+            else: df_input = pd.read_excel(uploaded_file)
+            
+            for index, row in df_input.iterrows():
+                genes_data.append({"Gene_ID": str(row.get("Gene_ID", f"Gene_{index}")), "Sequence": str(row.get("Sequence", "")), "Target": str(row.get("Target", ""))})
+        except Exception as e:
+            st.error(f"Error reading file: {e}")
 
-# --- Execution Logic ---
-if st.button("🚀 Design Primers", type="primary"):
-    if not sequence: st.error("Please enter a DNA sequence to proceed.")
-    else:
-        with st.spinner('Calculating Folds, Simulating Reactions & Distributing...'):
-            try:
-                clean_seq = "".join(sequence.split()).upper()
-                junction_list = [int(x.strip()) for x in junction_pos.split(',') if x.strip().isdigit()] if junction_pos else []
-                global_args = {
-                    'PRIMER_OPT_SIZE': 20, 'PRIMER_MIN_SIZE': 18, 'PRIMER_MAX_SIZE': 25,
-                    'PRIMER_OPT_TM': target_tm, 'PRIMER_MIN_TM': target_tm - 5.0, 'PRIMER_MAX_TM': target_tm + 5.0,
-                    'PRIMER_DNA_CONC': primer_conc, 'PRIMER_SALT_DIVALENT': mg_conc, 
-                    'PRIMER_SALT_MONOVALENT': 50.0, 'PRIMER_DNTP_CONC': 0.8,
-                    'PRIMER_TM_FORMULA': 1, 'PRIMER_SALT_CORRECTIONS': 1, 'PRIMER_THERMODYNAMIC_OLIGO_ALIGNMENT': 1,
-                    'PRIMER_NUM_RETURN': max(15, num_returns * 3) # Creates a wide pool for filtering
-                }
-                if min_amp.isdigit() and max_amp.isdigit(): global_args['PRIMER_PRODUCT_SIZE_RANGE'] = [[int(min_amp), int(max_amp)]]
+else:
+    # Single Mode Input
+    col_a, col_b = st.columns([2, 1])
+    with col_a: 
+        s_seq = st.text_area("Target Sequence (5' to 3'):", height=150)
+    with col_b:
+        s_id = st.text_input("Gene ID:", "MyGene")
+        s_target = st.text_input("Target (Smart Input):", placeholder="e.g., 452 OR 300-450")
+    if s_seq:
+        genes_data.append({"Gene_ID": s_id, "Sequence": s_seq, "Target": s_target})
 
-                pools = [] # List of lists (each item is a list of candidates from a specific exon)
+# --- Execution Engine ---
+if st.button("🚀 Run SPUD Engine", type="primary") and genes_data:
+    all_results = []
+    
+    global_args = {
+        'PRIMER_OPT_SIZE': 20, 'PRIMER_MIN_SIZE': 18, 'PRIMER_MAX_SIZE': 25,
+        'PRIMER_OPT_TM': target_tm, 'PRIMER_MIN_TM': target_tm - 5.0, 'PRIMER_MAX_TM': target_tm + 5.0,
+        'PRIMER_DNA_CONC': primer_conc, 'PRIMER_SALT_DIVALENT': mg_conc, 
+        'PRIMER_SALT_MONOVALENT': 50.0, 'PRIMER_DNTP_CONC': 0.8,
+        'PRIMER_TM_FORMULA': 1, 'PRIMER_SALT_CORRECTIONS': 1, 'PRIMER_THERMODYNAMIC_OLIGO_ALIGNMENT': 1,
+        'PRIMER_NUM_RETURN': max(20, num_returns * 5) # Wide pool for internal filtering
+    }
+    if min_amp.isdigit() and max_amp.isdigit(): 
+        global_args['PRIMER_PRODUCT_SIZE_RANGE'] = [[int(min_amp), int(max_amp)]]
+
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    for idx, gene in enumerate(genes_data):
+        status_text.text(f"Processing {gene['Gene_ID']} ({idx+1}/{len(genes_data)})...")
+        clean_seq = "".join(gene['Sequence'].split()).upper()
+        if len(clean_seq) < 50:
+            all_results.append({"Gene_ID": gene['Gene_ID'], "Status": "Error: Sequence too short"})
+            continue
+
+        target_type, target_val = parse_target(gene['Target'])
+        seq_args = {'SEQUENCE_ID': gene['Gene_ID'], 'SEQUENCE_TEMPLATE': clean_seq}
+        
+        # Apply Constraints
+        if target_type == "Junction":
+            # Edge case check for 7bp rule physical possibility
+            if target_val < 20 or target_val > len(clean_seq) - 20:
+                all_results.append({"Gene_ID": gene['Gene_ID'], "Status": "Error: Junction too close to sequence edge"})
+                continue
+            seq_args['SEQUENCE_OVERLAP_JUNCTION_LIST'] = [target_val]
+        
+        elif target_type == "ROI":
+            # Included region is [start, length]
+            roi_start = max(0, target_val[0] - 1) # 0-based index
+            roi_len = target_val[1] - target_val[0] + 1
+            if roi_len > 0 and roi_start + roi_len <= len(clean_seq):
+                seq_args['SEQUENCE_INCLUDED_REGION'] = [roi_start, roi_len]
+            else:
+                all_results.append({"Gene_ID": gene['Gene_ID'], "Status": "Error: Invalid ROI range"})
+                continue
+        
+        elif target_type == "Error":
+            all_results.append({"Gene_ID": gene['Gene_ID'], "Status": "Error: Invalid Target format"})
+            continue
+
+        # Design Primers
+        try:
+            raw_res = primer3.bindings.designPrimers(seq_args, global_args)
+            valid_candidates = []
+            
+            for i in range(raw_res.get('PRIMER_PAIR_NUM_RETURNED', 0)):
+                f_start = raw_res.get(f'PRIMER_LEFT_{i}')[0]
+                f_len = raw_res.get(f'PRIMER_LEFT_{i}')[1]
+                r_start = raw_res.get(f'PRIMER_RIGHT_{i}')[0]
+                r_len = raw_res.get(f'PRIMER_RIGHT_{i}')[1]
+                f_seq = raw_res.get(f'PRIMER_LEFT_{i}_SEQUENCE')
+                r_seq = raw_res.get(f'PRIMER_RIGHT_{i}_SEQUENCE')
                 
-                if junction_list:
-                    for j in junction_list:
-                        seq_args = {'SEQUENCE_ID': f"J_{j}", 'SEQUENCE_TEMPLATE': clean_seq, 'SEQUENCE_OVERLAP_JUNCTION_LIST': [j]}
-                        raw_res = primer3.bindings.designPrimers(seq_args, global_args)
-                        j_cands = []
-                        for i in range(raw_res.get('PRIMER_PAIR_NUM_RETURNED', 0)):
-                            j_cands.append({
-                                'penalty': raw_res.get(f'PRIMER_PAIR_{i}_PENALTY', 999.0),
-                                'left_start': raw_res.get(f'PRIMER_LEFT_{i}')[0], 'right_start': raw_res.get(f'PRIMER_RIGHT_{i}')[0],
-                                'forward_seq': raw_res.get(f'PRIMER_LEFT_{i}_SEQUENCE'), 'reverse_seq': raw_res.get(f'PRIMER_RIGHT_{i}_SEQUENCE'),
-                                'forward_tm': raw_res.get(f'PRIMER_LEFT_{i}_TM'), 'reverse_tm': raw_res.get(f'PRIMER_RIGHT_{i}_TM'),
-                                'product_size': raw_res.get(f'PRIMER_PAIR_{i}_PRODUCT_SIZE'), 'junction_used': j
-                            })
-                        if j_cands: pools.append(j_cands)
-                else:
-                    seq_args = {'SEQUENCE_ID': project_name, 'SEQUENCE_TEMPLATE': clean_seq}
-                    raw_res = primer3.bindings.designPrimers(seq_args, global_args)
-                    cands = []
-                    for i in range(raw_res.get('PRIMER_PAIR_NUM_RETURNED', 0)):
-                        cands.append({
-                            'penalty': raw_res.get(f'PRIMER_PAIR_{i}_PENALTY', 999.0),
-                            'left_start': raw_res.get(f'PRIMER_LEFT_{i}')[0], 'right_start': raw_res.get(f'PRIMER_RIGHT_{i}')[0],
-                            'forward_seq': raw_res.get(f'PRIMER_LEFT_{i}_SEQUENCE'), 'reverse_seq': raw_res.get(f'PRIMER_RIGHT_{i}_SEQUENCE'),
-                            'forward_tm': raw_res.get(f'PRIMER_LEFT_{i}_TM'), 'reverse_tm': raw_res.get(f'PRIMER_RIGHT_{i}_TM'),
-                            'product_size': raw_res.get(f'PRIMER_PAIR_{i}_PRODUCT_SIZE'), 'junction_used': "None"
-                        })
-                    if cands: pools.append(cands)
-
-                if not pools: 
-                    st.warning("⚠️ No primers found. Try relaxing the constraints.")
-                else:
-                    # Step 1: Calculate Template Penalty
-                    for pool in pools:
-                        for cand in pool:
-                            f_temp_tm = primer3.calc_hairpin(rev_comp(cand['forward_seq'])).tm
-                            r_temp_tm = primer3.calc_hairpin(rev_comp(cand['reverse_seq'])).tm
-                            if f_temp_tm >= (cand['forward_tm'] - 3.0) or r_temp_tm >= (cand['reverse_tm'] - 3.0):
-                                cand['Template_SecStruct'] = "!"
-                                cand['penalty'] += 50.0 
-                            else: 
-                                cand['Template_SecStruct'] = "v"
-                        pool.sort(key=lambda x: x['penalty'])
-
-                    # Step 2: Round-Robin distribution
-                    candidates_to_process = []
-                    max_cands = max(len(p) for p in pools)
-                    rr_counter = 0
-                    for i in range(max_cands):
-                        for pool in pools:
-                            if i < len(pool):
-                                cand = pool[i]
-                                cand['rr_rank'] = rr_counter 
-                                candidates_to_process.append(cand)
-                                rr_counter += 1
+                # Enforce strict 7-bp rule if Junction
+                if target_type == "Junction":
+                    f_valid = validate_7bp_anchor(f_start, f_len, target_val, is_reverse=False)
+                    r_valid = validate_7bp_anchor(r_start, r_len, target_val, is_reverse=True)
+                    if not (f_valid or r_valid): 
+                        continue # Skip candidate if neither primer anchors properly
+                
+                # Check Template Sec Struct
+                f_temp_tm = primer3.calc_hairpin(rev_comp(f_seq)).tm
+                r_temp_tm = primer3.calc_hairpin(rev_comp(r_seq)).tm
+                f_tm = raw_res.get(f'PRIMER_LEFT_{i}_TM')
+                r_tm = raw_res.get(f'PRIMER_RIGHT_{i}_TM')
+                
+                sec_struct_flag = "!" if (f_temp_tm >= f_tm - 3.0 or r_temp_tm >= r_tm - 3.0) else "v"
+                penalty = raw_res.get(f'PRIMER_PAIR_{i}_PENALTY')
+                if sec_struct_flag == "!": penalty += 50.0
+                
+                valid_candidates.append({
+                    "Gene_ID": gene['Gene_ID'],
+                    "Forward_Seq": f_seq,
+                    "Reverse_Seq": r_seq,
+                    "F_Tm": round(f_tm, 1),
+                    "R_Tm": round(r_tm, 1),
+                    "Amp_Len": raw_res.get(f'PRIMER_PAIR_{i}_PRODUCT_SIZE'),
+                    "Template_Fold": sec_struct_flag,
+                    "Penalty": penalty
+                })
+            
+            # Sort and slice
+            valid_candidates.sort(key=lambda x: x['Penalty'])
+            top_candidates = valid_candidates[:num_returns]
+            
+            if not top_candidates:
+                all_results.append({"Gene_ID": gene['Gene_ID'], "Status": "No candidates found under current constraints"})
+            else:
+                for rank, cand in enumerate(top_candidates):
+                    cand['Rank'] = rank + 1
+                    cand['Status'] = "Pending"
+                    all_results.append(cand)
                     
-                    candidates_to_process = candidates_to_process[:max(10, num_returns * 2)]
-                    blast_details = []
+        except Exception as e:
+            all_results.append({"Gene_ID": gene['Gene_ID'], "Status": f"Processing Error: {e}"})
+        
+        progress_bar.progress((idx + 1) / len(genes_data))
 
-                    # Step 3: BLAST Gatekeeper
-                    if run_blast_check:
-                        for idx, cand in enumerate(candidates_to_process):
-                            st.toast(f"BLASTing Candidate {idx+1}/{len(candidates_to_process)}...")
-                            f_sum, f_det = check_and_get_blast(cand['forward_seq'], species_name)
-                            r_sum, r_det = check_and_get_blast(cand['reverse_seq'], species_name)
-                            cand['f_blast_sum'], cand['f_blast_det'] = f_sum, f_det
-                            cand['r_blast_sum'], cand['r_blast_det'] = r_sum, r_det
-                            
-                            try: f_hits = int(f_sum.split()[0])
-                            except: f_hits = 99
-                            try: r_hits = int(r_sum.split()[0])
-                            except: r_hits = 99
-                            
-                            cand['blast_bad'] = 1 if (f_hits > 1 or r_hits > 1) else 0
-                        
-                        # Step 4: Final Sort
-                        candidates_to_process.sort(key=lambda x: (x.get('blast_bad', 0), x['rr_rank']))
-                        final_candidates = candidates_to_process[:num_returns]
-                        
-                        for cand in final_candidates:
-                            blast_details.append({"F": cand['f_blast_det'], "R": cand['r_blast_det']})
+    # --- Post-Processing: BLAST & Tm Flagging ---
+    status_text.text("Finalizing Batch (BLAST & Quality Checks)...")
+    
+    # Calculate Global Mean Tm
+    successful_tms = [c['F_Tm'] for c in all_results if 'F_Tm' in c] + [c['R_Tm'] for c in all_results if 'R_Tm' in c]
+    global_mean_tm = sum(successful_tms) / len(successful_tms) if successful_tms else 60.0
+    
+    for cand in all_results:
+        if cand.get('Status') == "Pending":
+            # Tm Flagging
+            mean_pair_tm = (cand['F_Tm'] + cand['R_Tm']) / 2.0
+            if abs(mean_pair_tm - global_mean_tm) > 1.5:
+                cand['Tm_Flag'] = "Outlier"
+            else:
+                cand['Tm_Flag'] = "OK"
+            
+            # BLAST Logic (Rank 1 Only)
+            if run_blast_check:
+                if cand['Rank'] == 1:
+                    status_text.text(f"Running BLAST for {cand['Gene_ID']} (Rank 1)...")
+                    cand['Status'] = check_and_get_blast(cand['Forward_Seq'], species_name)
+                else:
+                    cand['Status'] = "Skipped BLAST"
+            else:
+                cand['Status'] = "Ready"
 
-                    else:
-                        final_candidates = candidates_to_process[:num_returns]
-                        for cand in final_candidates:
-                            cand['f_blast_sum'] = "Skipped"
-                            cand['r_blast_sum'] = "Skipped"
-
-                    # Step 5: Build final table
-                    parsed_data = []
-                    for idx, cand in enumerate(final_candidates):
-                        f_seq = cand['forward_seq']
-                        r_seq = cand['reverse_seq']
-                        
-                        parsed_data.append({
-                            "Rank": idx + 1,
-                            "Penalty": cand['penalty'],
-                            "Junction": cand['junction_used'],
-                            "Forward_pos": f"F{cand['left_start']}",
-                            "Forward_Seq": f_seq,
-                            "F_Self (ΔG)": primer3.calc_homodimer(f_seq).dg / 1000.0,
-                            "F_Hairpin (ΔG)": primer3.calc_hairpin(f_seq).dg / 1000.0,
-                            "F_BLAST": cand['f_blast_sum'],
-                            "F_Tm (°C)": cand['forward_tm'],
-                            "Reverse_pos": f"R{cand['right_start']}",
-                            "Reverse_Seq": r_seq,
-                            "R_Self (ΔG)": primer3.calc_homodimer(r_seq).dg / 1000.0,
-                            "R_Hairpin (ΔG)": primer3.calc_hairpin(r_seq).dg / 1000.0,
-                            "R_BLAST": cand['r_blast_sum'],
-                            "R_Tm (°C)": cand['reverse_tm'],
-                            "CrossDimer (ΔG)": primer3.calc_heterodimer(f_seq, r_seq).dg / 1000.0,
-                            "Amp_Length": cand['product_size'],
-                            "Template_Fold": cand['Template_SecStruct'] 
-                        })
-                    
-                    df = pd.DataFrame(parsed_data)
-                    st.success("✅ Analysis Complete!")
-
-                    # --- Visual Map ---
-                    st.subheader("🗺️ Amplicon Map")
-                    fig = go.Figure()
-                    fig.add_shape(type="rect", x0=0, y0=0, x1=len(clean_seq), y1=1, line=dict(color="gray", width=2), fillcolor="lightgray")
-
-                    for idx, cand in enumerate(final_candidates):
-                        y_center = 1.5 + (idx * 0.6)
-                        fig.add_shape(type="rect", x0=cand['left_start'], y0=y_center-0.2, x1=cand['right_start'], y1=y_center+0.2, 
-                                      line=dict(color="DarkGreen", width=1), fillcolor="LimeGreen", opacity=0.8)
-                        fig.add_annotation(x=(cand['left_start'] + cand['right_start'])/2, y=y_center, 
-                                           text=f"Candidate {idx+1}", showarrow=False, font=dict(color="black", size=11))
-
-                    max_y = 1.5 + (len(final_candidates) * 0.6)
-                    if junction_list:
-                        for j in junction_list:
-                            fig.add_shape(type="line", x0=j, y0=-0.5, x1=j, y1=max_y, line=dict(color="red", width=2, dash="dash"))
-                            fig.add_annotation(x=j, y=max_y + 0.2, text=f"Exon {j}", showarrow=False, font=dict(color="red", size=10))
-
-                    fig.update_layout(xaxis=dict(range=[-20, len(clean_seq)+20], title="Position (bp)"), 
-                                      yaxis=dict(showticklabels=False, range=[-0.5, max_y + 0.5]), 
-                                      height=250 + (len(final_candidates) * 30), margin=dict(l=20, r=20, t=30, b=30), plot_bgcolor="white")
-                    st.plotly_chart(fig, use_container_width=True)
-
-                    # --- Formatted Final Table ---
-                    st.markdown("### Detailed Results Table")
-                    try:
-                        styled_df = df.style.format(precision=1)
-                        if hasattr(styled_df, "map"):
-                            styled_df = styled_df.map(lambda x: color_negative_red(x, -5.0), subset=['F_Self (ΔG)', 'R_Self (ΔG)', 'CrossDimer (ΔG)']) \
-                                                 .map(lambda x: color_negative_red(x, -3.0), subset=['F_Hairpin (ΔG)', 'R_Hairpin (ΔG)']) \
-                                                 .map(color_blast_red, subset=['F_BLAST', 'R_BLAST']) \
-                                                 .map(color_sec_struct, subset=['Template_Fold'])
-                        else:
-                            styled_df = styled_df.applymap(lambda x: color_negative_red(x, -5.0), subset=['F_Self (ΔG)', 'R_Self (ΔG)', 'CrossDimer (ΔG)']) \
-                                                 .applymap(lambda x: color_negative_red(x, -3.0), subset=['F_Hairpin (ΔG)', 'R_Hairpin (ΔG)']) \
-                                                 .applymap(color_blast_red, subset=['F_BLAST', 'R_BLAST']) \
-                                                 .applymap(color_sec_struct, subset=['Template_Fold'])
-                    except:
-                        styled_df = df
-
-                    st.dataframe(styled_df, use_container_width=True)
-                    st.download_button("📥 Download Results (CSV)", df.to_csv(index=False).encode('utf-8'), f"{project_name}.csv", "text/csv")
-
-                    if run_blast_check:
-                        st.markdown("### 🔍 BLAST Alignments")
-                        for idx, detail in enumerate(blast_details):
-                            with st.expander(f"View Alignments for Candidate {idx+1}"):
-                                st.write("**Forward Primer:**")
-                                st.code(detail["F"], language="text")
-                                st.write("**Reverse Primer:**")
-                                st.code(detail["R"], language="text")
-
-            except Exception as e: st.error(f"Error executing analysis: {e}")
+    status_text.text("Complete!")
+    
+    # --- Final Output Formatting ---
+    # Ensure ordered columns
+    cols = ['Gene_ID', 'Rank', 'Forward_Seq', 'Reverse_Seq', 'F_Tm', 'R_Tm', 'Tm_Flag', 'Amp_Len', 'Template_Fold', 'Status']
+    df_results = pd.DataFrame(all_results)
+    
+    # Reindex to ensure missing columns don't crash, and keep order
+    existing_cols = [c for c in cols if c in df_results.columns]
+    df_results = df_results[existing_cols]
+    
+    st.dataframe(df_results, use_container_width=True)
+    
+    csv = df_results.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Download Batch Results (CSV)",
+        data=csv,
+        file_name="SPUD_Batch_Results.csv",
+        mime="text/csv",
+        type="primary"
+    )
