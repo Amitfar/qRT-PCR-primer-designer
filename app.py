@@ -6,51 +6,6 @@ from Bio.Blast import NCBIWWW
 from Bio.Blast import NCBIXML
 from Bio import Entrez
 
-# Configuration for NCBI
-Entrez.email = "spud_researcher@example.com" 
-
-# --- NCBI Taxonomy Search Logic ---
-# Changed the function name slightly to bust Streamlit's cache
-@st.cache_data(show_spinner=False)
-def fetch_ncbi_tax_options(query):
-    query = query.strip()
-    if not query or len(query) < 3:
-        return []
-    try:
-        # Removed the restrictive [Scientific Name] tag so the wildcard (*) works properly
-        handle = Entrez.esearch(db="taxonomy", term=f"{query}*", retmax=50)
-        record = Entrez.read(handle)
-        handle.close()
-        
-        ids = record["IdList"]
-        if not ids: return []
-            
-        handle = Entrez.efetch(db="taxonomy", id=",".join(ids), retmode="xml")
-        records = Entrez.read(handle)
-        handle.close()
-        
-        formatted_names = []
-        for r in records:
-            sci_name = r.get("ScientificName", "")
-            common_name = ""
-            
-            if "OtherNames" in r:
-                other_names = r["OtherNames"]
-                if "GenbankCommonName" in other_names and other_names["GenbankCommonName"]:
-                    common_name = other_names["GenbankCommonName"]
-                elif "CommonName" in other_names and other_names["CommonName"]:
-                    c_name_data = other_names["CommonName"]
-                    common_name = c_name_data[0] if isinstance(c_name_data, list) else c_name_data
-            
-            if common_name:
-                formatted_names.append(f"{sci_name} ({common_name})")
-            else:
-                formatted_names.append(sci_name)
-                
-        return list(dict.fromkeys(formatted_names))
-    except Exception:
-        return [query]
-
 # --- Helper Functions & Thermodynamics ---
 def rev_comp(seq):
     complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A'}
@@ -113,30 +68,55 @@ def color_sec_struct(val):
 # --- Page Setup ---
 st.set_page_config(page_title="SPUD - Primer Designer", page_icon="🧬", layout="wide")
 
+# --- Documentation Sidebar ---
+with st.sidebar:
+    st.title("📖 SPUD Documentation")
+    st.markdown("Welcome to **SPUD** (Specific Primer Universal Designer).")
+    
+    with st.expander("🔄 1. The SPUD Workflow"):
+        st.write("""
+        1. **Design & Distribute:** Generates raw primers, forcibly selecting candidates evenly across all provided Exon-Exon junctions (Round-Robin).
+        2. **Thermodynamic Penalty:** Calculates standard Primer3 penalties + strict UNAFold-like penalties for template secondary structures.
+        3. **BLAST Gatekeeper (Optional):** Screens the top candidates against NCBI. Any pair with >1 hit is pushed to the bottom of the list.
+        4. **Final Sort:** Prioritizes specificity (BLAST) while strictly maintaining the diverse junction distribution.
+        """)
+        
+    with st.expander("🎛️ 2. Input Parameters (What you can tweak)"):
+        st.write("""
+        * **Target Sequence:** Your full gene/cDNA FASTA sequence.
+        * **Species:** Scientific name (e.g., *Solanum tuberosum*). Crucial for accurate BLAST results.
+        * **Exon-Exon Junctions:** Base-pair indexes where exons meet. SPUD will span primers across these points.
+        * **Primer / Mg2+ Conc:** Calibrated by default to Fast SYBR® Green. Adjust only if using a different Master Mix.
+        * **Target Tm:** The ideal melting temperature for your reaction.
+        * **Amplicon Length:** Keep between 80-150 for optimal qPCR efficiency.
+        """)
+
+    with st.expander("📊 3. Output Parameters (Reading the Table)"):
+        st.write("""
+        * **Penalty:** Objective score. Lower is better.
+        * **ΔG (Gibbs Free Energy):** Measures structure stability in *kcal/mol*. 
+          * *Self / Cross Dimers:* Safe if > -5.0. If lower (red), they may form primer-dimers.
+          * *Hairpins:* Safe if > -3.0. If lower (red), the primer folds on itself.
+        * **BLAST:** Target specificity. "1 Hit ✅" is ideal. >1 Hit (red) means off-target binding risk.
+        * **Template_Fold (v / !):** Evaluates the DNA template (Amplicon). If marked with "!", the template forms a stable secondary structure within 3°C of your primer's Tm, risking amplification failure.
+        """)
+
+# --- Main Header ---
 st.title("🧬 SPUD: Specific Primer Universal Designer")
+st.markdown("""
+**SPUD** is a high-precision tool for plant scientists, calibrated for **Fast SYBR® Green** reactions. 
+It features smart exon-junction distribution, real-time **ΔG** screening, template UNAFold-like risk assessment, 
+and automated **Locus Tag** identification for any plant species via NCBI BLAST.
+""")
 st.divider()
 
-# --- Main Interface ---
+# --- User Interface ---
 col1, col2 = st.columns([2, 1])
-
 with col1: 
-    sequence = st.text_area("Target Sequence (5' to 3'):", height=230, placeholder="Paste your FASTA sequence...")
-
+    sequence = st.text_area("Target Sequence (5' to 3'):", height=200, placeholder="Paste your FASTA sequence...")
 with col2:
     project_name = st.text_input("Project Name:", "My_Gene_Cloning")
-    
-    st.markdown("**Species (Type & press Enter):**")
-    species_query = st.text_input("Search Taxonomy", value="Solanum", label_visibility="collapsed")
-    
-    # Called the new function name here
-    species_options = fetch_ncbi_tax_options(species_query)
-    
-    if species_options:
-        selected_full_name = st.selectbox("Select match:", options=species_options, label_visibility="collapsed")
-        species_for_blast = selected_full_name.split(" (")[0]
-    else:
-        species_for_blast = species_query
-
+    species_name = st.text_input("Species (for BLAST):", "Solanum tuberosum")
     junction_pos = st.text_input("Exon-Exon Junctions:", placeholder="e.g., 72, 478")
     run_blast_check = st.checkbox("🔍 Run NCBI BLAST (Gatekeeper Mode)")
 
@@ -166,11 +146,11 @@ if st.button("🚀 Design Primers", type="primary"):
                     'PRIMER_DNA_CONC': primer_conc, 'PRIMER_SALT_DIVALENT': mg_conc, 
                     'PRIMER_SALT_MONOVALENT': 50.0, 'PRIMER_DNTP_CONC': 0.8,
                     'PRIMER_TM_FORMULA': 1, 'PRIMER_SALT_CORRECTIONS': 1, 'PRIMER_THERMODYNAMIC_OLIGO_ALIGNMENT': 1,
-                    'PRIMER_NUM_RETURN': max(15, num_returns * 3)
+                    'PRIMER_NUM_RETURN': max(15, num_returns * 3) # Creates a wide pool for filtering
                 }
                 if min_amp.isdigit() and max_amp.isdigit(): global_args['PRIMER_PRODUCT_SIZE_RANGE'] = [[int(min_amp), int(max_amp)]]
 
-                pools = [] 
+                pools = [] # List of lists (each item is a list of candidates from a specific exon)
                 
                 if junction_list:
                     for j in junction_list:
@@ -203,6 +183,7 @@ if st.button("🚀 Design Primers", type="primary"):
                 if not pools: 
                     st.warning("⚠️ No primers found. Try relaxing the constraints.")
                 else:
+                    # Step 1: Calculate Template Penalty
                     for pool in pools:
                         for cand in pool:
                             f_temp_tm = primer3.calc_hairpin(rev_comp(cand['forward_seq'])).tm
@@ -214,6 +195,7 @@ if st.button("🚀 Design Primers", type="primary"):
                                 cand['Template_SecStruct'] = "v"
                         pool.sort(key=lambda x: x['penalty'])
 
+                    # Step 2: Round-Robin distribution
                     candidates_to_process = []
                     max_cands = max(len(p) for p in pools)
                     rr_counter = 0
@@ -221,18 +203,19 @@ if st.button("🚀 Design Primers", type="primary"):
                         for pool in pools:
                             if i < len(pool):
                                 cand = pool[i]
-                                cand['rr_rank'] = rr_counter
+                                cand['rr_rank'] = rr_counter 
                                 candidates_to_process.append(cand)
                                 rr_counter += 1
                     
                     candidates_to_process = candidates_to_process[:max(10, num_returns * 2)]
                     blast_details = []
 
+                    # Step 3: BLAST Gatekeeper
                     if run_blast_check:
                         for idx, cand in enumerate(candidates_to_process):
                             st.toast(f"BLASTing Candidate {idx+1}/{len(candidates_to_process)}...")
-                            f_sum, f_det = check_and_get_blast(cand['forward_seq'], species_for_blast)
-                            r_sum, r_det = check_and_get_blast(cand['reverse_seq'], species_for_blast)
+                            f_sum, f_det = check_and_get_blast(cand['forward_seq'], species_name)
+                            r_sum, r_det = check_and_get_blast(cand['reverse_seq'], species_name)
                             cand['f_blast_sum'], cand['f_blast_det'] = f_sum, f_det
                             cand['r_blast_sum'], cand['r_blast_det'] = r_sum, r_det
                             
@@ -243,6 +226,7 @@ if st.button("🚀 Design Primers", type="primary"):
                             
                             cand['blast_bad'] = 1 if (f_hits > 1 or r_hits > 1) else 0
                         
+                        # Step 4: Final Sort
                         candidates_to_process.sort(key=lambda x: (x.get('blast_bad', 0), x['rr_rank']))
                         final_candidates = candidates_to_process[:num_returns]
                         
@@ -255,6 +239,7 @@ if st.button("🚀 Design Primers", type="primary"):
                             cand['f_blast_sum'] = "Skipped"
                             cand['r_blast_sum'] = "Skipped"
 
+                    # Step 5: Build final table
                     parsed_data = []
                     for idx, cand in enumerate(final_candidates):
                         f_seq = cand['forward_seq']
@@ -278,12 +263,13 @@ if st.button("🚀 Design Primers", type="primary"):
                             "R_Tm (°C)": cand['reverse_tm'],
                             "CrossDimer (ΔG)": primer3.calc_heterodimer(f_seq, r_seq).dg / 1000.0,
                             "Amp_Length": cand['product_size'],
-                            "Template_Fold": cand['Template_SecStruct']
+                            "Template_Fold": cand['Template_SecStruct'] 
                         })
                     
                     df = pd.DataFrame(parsed_data)
                     st.success("✅ Analysis Complete!")
 
+                    # --- Visual Map ---
                     st.subheader("🗺️ Amplicon Map")
                     fig = go.Figure()
                     fig.add_shape(type="rect", x0=0, y0=0, x1=len(clean_seq), y1=1, line=dict(color="gray", width=2), fillcolor="lightgray")
@@ -306,6 +292,7 @@ if st.button("🚀 Design Primers", type="primary"):
                                       height=250 + (len(final_candidates) * 30), margin=dict(l=20, r=20, t=30, b=30), plot_bgcolor="white")
                     st.plotly_chart(fig, use_container_width=True)
 
+                    # --- Formatted Final Table ---
                     st.markdown("### Detailed Results Table")
                     try:
                         styled_df = df.style.format(precision=1)
