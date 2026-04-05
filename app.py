@@ -12,14 +12,9 @@ Entrez.email = "spud_researcher@example.com"
 # --- NCBI Taxonomy Search Logic ---
 @st.cache_data(show_spinner=False)
 def fetch_ncbi_species_with_common(query):
-    """
-    Fetches scientific names and common names from NCBI.
-    Returns a list formatted as 'Scientific Name (common name)'.
-    """
     if not query or len(query) < 3:
         return []
     try:
-        # Search Taxonomy ID (increased retmax to match the screenshot scope)
         handle = Entrez.esearch(db="taxonomy", term=f"{query}[Scientific Name]", retmax=50)
         record = Entrez.read(handle)
         handle.close()
@@ -27,7 +22,6 @@ def fetch_ncbi_species_with_common(query):
         ids = record["IdList"]
         if not ids: return []
             
-        # Fetch detailed records to get common names
         handle = Entrez.efetch(db="taxonomy", id=",".join(ids), retmode="xml")
         records = Entrez.read(handle)
         handle.close()
@@ -37,7 +31,6 @@ def fetch_ncbi_species_with_common(query):
             sci_name = r.get("ScientificName", "")
             common_name = ""
             
-            # Safely extract common name to prevent KeyErrors
             if "OtherNames" in r:
                 other_names = r["OtherNames"]
                 if "GenbankCommonName" in other_names and other_names["GenbankCommonName"]:
@@ -51,9 +44,8 @@ def fetch_ncbi_species_with_common(query):
             else:
                 formatted_names.append(sci_name)
                 
-        # Remove duplicates while maintaining order
         return list(dict.fromkeys(formatted_names))
-    except Exception as e:
+    except Exception:
         return [query]
 
 # --- Helper Functions & Thermodynamics ---
@@ -116,53 +108,31 @@ def color_sec_struct(val):
     return ''
 
 # --- Page Setup ---
-st.set_page_config(page_title="SPUD - NCBI Integrated", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="SPUD - Primer Designer", page_icon="🧬", layout="wide")
 
-# Initialize Session State for Species List
-if "species_options" not in st.session_state:
-    st.session_state.species_options = ["Solanum tuberosum (potato)"]
-
-# --- Custom NCBI-Style Search UI ---
 st.title("🧬 SPUD: Specific Primer Universal Designer")
-
-st.markdown("### Search term")
-search_col, button_col = st.columns([5, 1])
-
-with search_col:
-    search_query = st.text_input(
-        label="Search term", 
-        value="solanum", 
-        label_visibility="collapsed", 
-        key="species_search_input"
-    )
-
-with button_col:
-    if st.button("Search", type="primary", use_container_width=True):
-        with st.spinner("Searching NCBI Taxonomy..."):
-            results = fetch_ncbi_species_with_common(search_query)
-            if results:
-                st.session_state.species_options = results
-            else:
-                st.warning("No results found.")
-
-selected_full_name = st.selectbox(
-    "Select specific organism from results:", 
-    options=st.session_state.species_options
-)
-
-# Extract only the scientific name for BLAST
-species_for_blast = selected_full_name.split(" (")[0]
-st.info(f"Target Species locked: **{species_for_blast}**")
-
 st.divider()
 
-# --- Inputs ---
+# --- Main Interface ---
 col1, col2 = st.columns([2, 1])
+
 with col1: 
-    sequence = st.text_area("Target Sequence (5' to 3'):", height=200, placeholder="Paste your FASTA sequence...")
+    sequence = st.text_area("Target Sequence (5' to 3'):", height=230, placeholder="Paste your FASTA sequence...")
 
 with col2:
     project_name = st.text_input("Project Name:", "My_Gene_Cloning")
+    
+    # Clean, compact species search logic
+    species_query = st.text_input("Species (Type & press Enter):", "Solanum")
+    species_options = fetch_ncbi_species_with_common(species_query)
+    
+    if species_options:
+        # Show dropdown without a label to avoid visual clutter
+        selected_full_name = st.selectbox("Select match:", options=species_options, label_visibility="collapsed")
+        species_for_blast = selected_full_name.split(" (")[0]
+    else:
+        species_for_blast = species_query
+
     junction_pos = st.text_input("Exon-Exon Junctions:", placeholder="e.g., 72, 478")
     run_blast_check = st.checkbox("🔍 Run NCBI BLAST (Gatekeeper Mode)")
 
